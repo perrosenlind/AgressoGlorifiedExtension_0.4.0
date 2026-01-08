@@ -1,0 +1,100 @@
+.MainTable {
+    width: 100% !important;
+}
+
+.DivOverflowNoWrap {
+    white-space: break-spaces !important;
+}
+
+#agresso-autosave-indicator {
+    position: fixed;
+    top: auto;
+    bottom: 20px;
+    right: 16px;
+    z-index: 9999;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 12px;
+    height: 34px;
+    min-width: 180px;
+    border-radius: 4px;
+    background: rgba(15, 23, 42, 0.9);
+    color: #e2e8f0;
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    font-size: 13px;
+    letter-spacing: 0.01em;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+    backdrop-filter: blur(4px);
+    pointer-events: none;
+    overflow: hidden;
+}
+
+#agresso-autosave-indicator .agresso-autosave-timer {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 3px;
+    width: 0;
+    background: #22c55e;
+    opacity: 0.9;
+}
+
+html.agresso-dark-mode .k-state-selected,
+html.agresso-dark-mode .selected,
+html.agresso-dark-mode tr:hover,
+html.agresso-dark-mode .k-grid tr:hover {
+    background-color: #1f2937 !important;
+}
+
+#agresso-autosave-indicator .agresso-autosave-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 9999px;
+    background: #22c55e;
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.6);
+    transition: background 0.2s ease, box-shadow 0.3s ease;
+}
+
+#agresso-autosave-indicator .agresso-autosave-label {
+    font-weight: 600;
+}
+
+#agresso-autosave-indicator .agresso-autosave-sub {
+    color: #cbd5e1;
+    font-size: 12px;
+}
+
+#agresso-autosave-indicator.agresso-saving {
+    background: rgba(37, 99, 235, 0.92);
+}
+
+#agresso-autosave-indicator.agresso-saving .agresso-autosave-dot {
+    background: #22c55e;
+    box-shadow: 0 0 0 5px rgba(34, 197, 94, 0.18);
+    animation: agresso-autosave-pulse 1.6s ease-in-out infinite;
+}
+
+#agresso-autosave-indicator.agresso-saved .agresso-autosave-dot {
+    background: #22c55e;
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.24);
+}
+
+#agresso-autosave-indicator.agresso-pending .agresso-autosave-dot {
+    background: #22c55e;
+}
+
+#agresso-autosave-indicator.agresso-error {
+    background: rgba(185, 28, 28, 0.92);
+}
+
+#agresso-autosave-indicator.agresso-error .agresso-autosave-dot {
+    background: #f87171;
+    box-shadow: 0 0 0 5px rgba(248, 113, 113, 0.18);
+}
+
+@keyframes agresso-autosave-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.25); }
+    70% { box-shadow: 0 0 0 12px rgba(34, 197, 94, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+}
