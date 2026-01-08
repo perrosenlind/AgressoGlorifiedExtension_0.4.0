@@ -152,6 +152,67 @@
   const CLOSE_SELECTORS = ['[aria-label="Close"]', '.close', '.k-i-close', '.modal-close'];
   const ACTIVITY_MESSAGE = 'agresso-autosave-activity';
 
+  // Toggle persistence key
+  const TOGGLE_KEY = 'agresso_autosave_enabled';
+
+  function getToggleEnabled() {
+    try {
+      const v = localStorage.getItem(TOGGLE_KEY);
+      if (v === null) return true;
+      return v === '1' || v === 'true';
+    } catch (e) {
+      return true;
+    }
+  }
+
+  function setToggleEnabled(enabled) {
+    try {
+      localStorage.setItem(TOGGLE_KEY, enabled ? '1' : '0');
+    } catch (e) {
+      // ignore
+    }
+    applyToggleState(enabled);
+    // When toggled off, stop timers and prevent saves. When toggled on, resume watching.
+    try {
+      if (!enabled) {
+        stopTimer();
+        setIndicator('pending', 'Autosave disabled', 'Paused');
+      } else {
+        setIndicator('saved', 'Autosave ready', 'Watching for edits');
+        // start idle timer anew
+        try { startTimer(IDLE_TIMEOUT_MS, 'idle'); } catch (e) { /* ignore */ }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function applyToggleState(enabled) {
+    try {
+      const doc = getIndicatorDocument();
+      const ind = doc.getElementById(INDICATOR_ID);
+      if (ind) {
+        if (!enabled) {
+          ind.classList.add('agresso-disabled');
+        } else {
+          ind.classList.remove('agresso-disabled');
+        }
+        if (enabled) {
+          ind.classList.add('agresso-enabled');
+        } else {
+          ind.classList.remove('agresso-enabled');
+        }
+      }
+      try {
+        document.documentElement.setAttribute('data-agresso-autosave-enabled', enabled ? '1' : '0');
+      } catch (e) {
+        // ignore
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
   function getIndicatorDocument() {
     try {
       if (window.top && window.top.document && window.top.document.body) {
@@ -231,6 +292,34 @@
     indicator = indicatorDoc.createElement('div');
     indicator.id = INDICATOR_ID;
 
+    // Create a small on/off toggle inside the indicator (we'll place it first)
+    let toggle = null;
+    try {
+      toggle = indicatorDoc.createElement('button');
+      toggle.className = 'agresso-toggle';
+      toggle.setAttribute('type', 'button');
+      toggle.setAttribute('aria-pressed', String(getToggleEnabled()));
+      toggle.title = 'Toggle autosave on / off';
+
+      const sw = indicatorDoc.createElement('span');
+      sw.className = 'switch';
+      const knob = indicatorDoc.createElement('span');
+      knob.className = 'knob';
+      sw.appendChild(knob);
+      toggle.appendChild(sw);
+
+      toggle.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        const cur = getToggleEnabled();
+        const next = !cur;
+        setToggleEnabled(next);
+        try { toggle.setAttribute('aria-pressed', String(next)); } catch (e) {}
+      }, true);
+    } catch (e) {
+      toggle = null;
+    }
+
     const dot = indicatorDoc.createElement('span');
     dot.className = 'agresso-autosave-dot';
 
@@ -240,11 +329,15 @@
     const sub = indicatorDoc.createElement('span');
     sub.className = 'agresso-autosave-sub';
 
+    // Append toggle first so it replaces the left-side dot visually
+    if (toggle) indicator.appendChild(toggle);
     indicator.appendChild(dot);
     indicator.appendChild(label);
     indicator.appendChild(sub);
 
+    // Append indicator to document and apply saved toggle state
     indicatorDoc.body.appendChild(indicator);
+    try { applyToggleState(getToggleEnabled()); } catch (e) {}
     return indicator;
   }
 
@@ -552,6 +645,17 @@
 
   function onTimerComplete() {
     console.debug(LOG_PREFIX, 'Timer completed', { reason: timerReason });
+    // If autosave is disabled, stop and don't proceed with save
+    try {
+      if (!getToggleEnabled()) {
+        console.debug(LOG_PREFIX, 'Timer completed but autosave disabled');
+        stopTimer();
+        setIndicator('pending', 'Autosave disabled', 'Paused');
+        return;
+      }
+    } catch (e) {
+      // ignore
+    }
     
     // Check if we should actually save
     if (dropdownActive) {
@@ -588,6 +692,16 @@
   }
 
   function performSave(trigger) {
+    // Respect toggle: skip saves when disabled
+    try {
+      if (!getToggleEnabled()) {
+        console.info(LOG_PREFIX, 'Autosave disabled, skipping save');
+        setIndicator('pending', 'Autosave disabled', 'Paused');
+        return;
+      }
+    } catch (e) {
+      // ignore
+    }
     // Only perform save from the top frame
     try {
       if (window.top && window.top !== window) return;
@@ -821,6 +935,14 @@
   }
 
   function sweepDialogs(reason) {
+    // If autosave is disabled, do not attempt to sweep/dismiss dialogs
+    try {
+      if (!getToggleEnabled()) {
+        return false;
+      }
+    } catch (e) {
+      // ignore
+    }
     // Only sweep dialogs from the top frame
     try {
       if (window.top && window.top !== window) return false;
@@ -933,6 +1055,12 @@
   }
 
   function startDialogSweep(reason) {
+    // Respect toggle: don't start sweeping dialogs when autosave is disabled
+    try {
+      if (!getToggleEnabled()) return;
+    } catch (e) {
+      // ignore
+    }
     // Extend sweep time if already running
     dialogSweepEndAt = Date.now() + DIALOG_SWEEP_MS;
     
@@ -1094,6 +1222,12 @@
   function init() {
     enhanceLayout();
     console.info(LOG_PREFIX, 'Init', { isMac: IS_MAC, shortcut: SHORTCUT_LABEL });
+    // Ensure autosave toggle always starts enabled
+    try {
+      setToggleEnabled(true);
+    } catch (e) {
+      // ignore
+    }
 
     // If this is not the top-level frame, do not start timers or perform saves here.
     // Non-top frames will forward activity events to the top frame via postMessage.
