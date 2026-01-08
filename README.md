@@ -31,6 +31,19 @@ Warning: Temporary add-ons are removed when the browser restarts.
 - Detects and dismisses save confirmation dialogs automatically (including in background/unfocused windows when possible).
 - Applies minor layout/column sizing improvements for better usability.
 
+## New: On/Off Toggle (Autosave control)
+
+- A clickable on/off toggle is embedded into the floating indicator (left side). It persists its state in `localStorage` under the key `agresso_autosave_enabled`.
+- Default behavior: the extension now forces the toggle to ON at startup so autosave is enabled by default.
+- When toggled OFF:
+   - Autosave timers are stopped and automatic saves are skipped.
+   - Dialog sweeping/dismissal is disabled (the script will not auto-dismiss save dialogs).
+   - The indicator shows **Autosave disabled** and the main label turns red; the switch appears grey.
+- When toggled ON:
+   - Autosave resumes (timer restarts) and dialog sweeping is enabled again.
+
+The toggle is intentionally placed where the previous green status dot appeared so it's visible and easy to reach.
+
 ## Key files
 
 - `manifest.json` — extension manifest and host permissions.
@@ -58,6 +71,13 @@ Important selectors and keywords are defined in `cells.js`:
 3. Edit a row or field. Interact (type, click, scroll) — you should see "Timer started" or other timer logs in the console.
 4. Stop interacting; after the idle timeout the extension should attempt to save and you should see logs like `Saving via shortcut` and `Dialog dismissed` if a dialog appeared.
 5. While the browser/tab is unfocused, try triggering a save; the script will attempt to dismiss background dialogs as well.
+
+### Verifying the toggle
+
+1. Toggle the switch to OFF and confirm the indicator label reads **Autosave disabled** in red.
+2. Make an edit and wait past the idle timeout — no automatic save should be attempted (check Console for lack of `Saving via shortcut`).
+3. Also confirm that save confirmation dialogs are not auto-dismissed while disabled.
+4. Toggle back ON to restore normal autosave behavior.
 
 If you don't see expected behavior:
 
