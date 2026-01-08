@@ -8,7 +8,7 @@ This small extension improves Agresso's UI and adds an autosave helper that watc
 2. Enable **Developer mode** (top-right).
 3. Click **Load unpacked** and choose the folder:
 
-   - `AgressoGlorifiedExtension_autosave`
+   - `AgressoGlorifiedExtension_0.4.0`
 
 4. Confirm the extension appears in the list and is enabled.
 
