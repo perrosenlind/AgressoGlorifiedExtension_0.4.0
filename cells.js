@@ -12,6 +12,7 @@
   const IS_MAC = /mac/i.test(navigator.platform);
   const SHORTCUT_LABEL = IS_MAC ? 'Option+S' : 'Alt+S';
   const LOG_PREFIX = '[Agresso Autosave]';
+  try { console.info(LOG_PREFIX, 'cells.js loaded'); } catch (e) {}
   const NO_CHANGES_TEXT = 'inga ändringar gjorda!';
   const SAVE_DIALOG_SELECTORS = [
     '[id^="u4_messageoverlay_success"]',
@@ -21,7 +22,6 @@
   ];
   const SAVE_DIALOG_KEYWORDS = [
     'spara',
-    'sparats',
     'sparade',
     'sparats som utkast',
     'tidrapport',
@@ -68,11 +68,12 @@
   let pendingRow = null;
   let dialogSweepTimer = null;
   let dialogSweepEndAt = 0;
+  let periodStatusRefreshTimer = null;
+  let periodHighlightEnforcer = null;
   let dropdownActive = false;
   let dropdownRow = null;
   let lastActivityAt = Date.now();
   let dialogMissLogged = false;
-  let fallbackMissLogged = false;
   let noChangesBannerVisible = false;
   let noChangesPollTimer = null;
   let timerBar = null;
@@ -148,6 +149,11 @@
   ];
 
   const INDICATOR_ID = 'agresso-autosave-indicator';
+  // When true, show extra debug controls (bell, debug, override/settings).
+  // Toggle in code during development by setting to `true` and reloading the page.
+  // You can also call `window.agresso_setIndicatorDebug(true)` in the console
+  // after reloading to persist the flag for the session (no reload required).
+  let INDICATOR_DEBUG = false;
   const OK_LABELS = ['ok', 'stäng', 'close', 'oké'];
   const CLOSE_SELECTORS = ['[aria-label="Close"]', '.close', '.k-i-close', '.modal-close'];
   const ACTIVITY_MESSAGE = 'agresso-autosave-activity';
@@ -320,6 +326,206 @@
       toggle = null;
     }
 
+    // Small reminder bell button: click toggles reminder on/off, Shift+click cycles language
+    let reminderBtn = null;
+    if (INDICATOR_DEBUG) {
+      try {
+        reminderBtn = indicatorDoc.createElement('button');
+        reminderBtn.className = 'agresso-reminder-btn';
+        reminderBtn.setAttribute('type', 'button');
+        reminderBtn.style.marginLeft = '6px';
+        reminderBtn.style.fontSize = '14px';
+        reminderBtn.style.lineHeight = '1';
+        reminderBtn.style.padding = '2px 6px';
+        reminderBtn.style.borderRadius = '4px';
+        reminderBtn.style.border = 'none';
+        reminderBtn.style.background = 'transparent';
+        reminderBtn.textContent = '🔔';
+        reminderBtn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          if (ev.shiftKey) {
+            const next = cycleReminderLang();
+            updateReminderButtonState(reminderBtn);
+            try { setIndicator('pending', next === 'en' ? 'Reminder (en)' : 'Påminnelse (sv)', ''); } catch (e) {}
+            return;
+          }
+          const cur = getReminderEnabled();
+          setReminderEnabled(!cur);
+          updateReminderButtonState(reminderBtn);
+        }, true);
+      } catch (e) {
+        reminderBtn = null;
+      }
+    }
+
+    // Debug button to log detection report to console (avoids CSP issues)
+    let debugBtn = null;
+    // Acknowledge button (marks reminder acknowledged without clearing)
+    let ackBtn = null;
+    if (INDICATOR_DEBUG) {
+      try {
+        debugBtn = indicatorDoc.createElement('button');
+        debugBtn.className = 'agresso-debug-btn';
+        debugBtn.setAttribute('type', 'button');
+        debugBtn.style.marginLeft = '6px';
+        debugBtn.style.fontSize = '12px';
+        debugBtn.style.lineHeight = '1';
+        debugBtn.style.padding = '2px 6px';
+        debugBtn.style.borderRadius = '4px';
+        debugBtn.style.border = 'none';
+        debugBtn.style.background = 'transparent';
+        debugBtn.textContent = '🐞';
+        debugBtn.title = 'Debug: print period-detection report to console';
+        debugBtn.addEventListener('click', (ev) => {
+          ev.stopPropagation(); ev.preventDefault();
+          try {
+            const report = buildDebugReport();
+            console.log(LOG_PREFIX, 'Period detection report', report);
+          } catch (e) {
+            console.error(LOG_PREFIX, 'Debug report failed', e);
+          }
+        }, true);
+      } catch (e) {
+        debugBtn = null;
+      }
+    }
+
+    try {
+      ackBtn = indicatorDoc.createElement('button');
+      ackBtn.className = 'agresso-ack-btn';
+      ackBtn.setAttribute('type', 'button');
+      ackBtn.style.marginLeft = '6px';
+      ackBtn.style.fontSize = '12px';
+      ackBtn.style.lineHeight = '1';
+      ackBtn.style.padding = '2px 6px';
+      ackBtn.style.borderRadius = '4px';
+      ackBtn.style.border = 'none';
+      ackBtn.style.background = 'transparent';
+      ackBtn.textContent = '✓';
+      ackBtn.title = 'Acknowledge reminder (click to mark)';
+      ackBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation(); ev.preventDefault();
+        try {
+          const last = (() => { try { return localStorage.getItem(PERIOD_NOTIFY_KEY); } catch (e) { return null; } })() || (new Date()).toISOString().slice(0,10);
+          const curAck = getPeriodAckDate();
+          if (curAck === last) {
+            clearPeriodAckDate();
+          } else {
+            setPeriodAckDate(last);
+          }
+          updateAckButtonState(ackBtn);
+          // Update indicator class
+          try {
+            const indicator = ensureIndicator();
+            if (getPeriodAckDate() === last) indicator.classList.add('agresso-acknowledged'); else indicator.classList.remove('agresso-acknowledged');
+          } catch (e) {}
+        } catch (e) {}
+      }, true);
+    } catch (e) { ackBtn = null; }
+
+    // Settings / override panel (only in debug mode)
+    let settingsBtn = null;
+    let settingsPanel = null;
+    if (INDICATOR_DEBUG) {
+      try {
+        settingsBtn = indicatorDoc.createElement('button');
+        settingsBtn.className = 'agresso-settings-btn';
+        settingsBtn.setAttribute('type', 'button');
+        settingsBtn.style.marginLeft = '6px';
+        settingsBtn.style.fontSize = '12px';
+        settingsBtn.style.lineHeight = '1';
+        settingsBtn.style.padding = '2px 6px';
+        settingsBtn.style.borderRadius = '4px';
+        settingsBtn.style.border = 'none';
+        settingsBtn.style.background = 'transparent';
+        settingsBtn.textContent = '⚙️';
+        settingsBtn.title = 'Settings: set manual period end override';
+
+        settingsPanel = indicatorDoc.createElement('div');
+        settingsPanel.className = 'agresso-settings-panel';
+        settingsPanel.style.position = 'fixed';
+        settingsPanel.style.zIndex = '999999';
+        settingsPanel.style.padding = '8px';
+        settingsPanel.style.background = '#fff';
+        settingsPanel.style.border = '1px solid #ccc';
+        settingsPanel.style.borderRadius = '6px';
+        settingsPanel.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
+        settingsPanel.style.display = 'none';
+        settingsPanel.innerHTML = '<div style="font-size:12px;margin-bottom:6px;">Manual period end (YYYY-MM-DD or DD/MM):</div>';
+
+        const inp = indicatorDoc.createElement('input');
+        inp.type = 'text';
+        inp.placeholder = '2026-01-11 or 11/01';
+        inp.style.width = '150px';
+        inp.style.marginRight = '6px';
+        settingsPanel.appendChild(inp);
+
+        const saveBtn = indicatorDoc.createElement('button');
+        saveBtn.textContent = 'Save';
+        saveBtn.style.marginRight = '4px';
+        settingsPanel.appendChild(saveBtn);
+
+        const clearBtn = indicatorDoc.createElement('button');
+        clearBtn.textContent = 'Clear';
+        settingsPanel.appendChild(clearBtn);
+
+        saveBtn.addEventListener('click', (ev) => {
+          ev.stopPropagation(); ev.preventDefault();
+          const v = inp.value && inp.value.trim();
+          if (!v) return;
+          setOverrideDate(v);
+          try { setIndicator('pending', 'Override saved', v); } catch (e) {}
+          // Request notification permission and trigger notification if override is today
+          try {
+            const parsed = parseDateFlexible(v);
+            const today = new Date();
+            const isToday = parsed && parsed.getFullYear && parsed.getFullYear() === today.getFullYear() && parsed.getMonth() === today.getMonth() && parsed.getDate() === today.getDate();
+            if (typeof Notification !== 'undefined' && Notification.permission !== 'granted' && Notification.permission !== 'denied') {
+              Notification.requestPermission().then((perm) => {
+                if (perm === 'granted' && isToday) {
+                  try { showPeriodNotification(parsed); } catch (e) {}
+                }
+              }).catch(() => {
+                if (isToday) try { setIndicator('pending', 'Sista dagen i perioden', 'Skicka in tidrapport idag'); } catch (e) {}
+              });
+            } else {
+              if (isToday) {
+                try { showPeriodNotification(parsed); } catch (e) { try { setIndicator('pending', 'Sista dagen i perioden', 'Skicka in tidrapport idag'); } catch (e2) {} }
+              }
+            }
+          } catch (e) {
+            // ignore
+          }
+          settingsPanel.style.display = 'none';
+        }, true);
+
+        clearBtn.addEventListener('click', (ev) => {
+          ev.stopPropagation(); ev.preventDefault();
+          clearOverrideDate();
+          try { setIndicator('saved', 'Override cleared', ''); } catch (e) {}
+          settingsPanel.style.display = 'none';
+        }, true);
+
+        settingsBtn.addEventListener('click', (ev) => {
+          ev.stopPropagation(); ev.preventDefault();
+          if (settingsPanel.style.display === 'none') {
+            // prefill with existing override if present
+            try { const o = localStorage.getItem(PERIOD_OVERRIDE_KEY); if (o) inp.value = o; else inp.value = ''; } catch (e) { inp.value = ''; }
+            const rect = settingsBtn.getBoundingClientRect();
+            settingsPanel.style.left = `${Math.max(8, rect.left)}px`;
+            settingsPanel.style.top = `${Math.max(8, rect.top - 80)}px`;
+            settingsPanel.style.display = 'block';
+          } else {
+            settingsPanel.style.display = 'none';
+          }
+        }, true);
+
+      } catch (e) {
+        settingsBtn = null; settingsPanel = null;
+      }
+    }
+
     const dot = indicatorDoc.createElement('span');
     dot.className = 'agresso-autosave-dot';
 
@@ -331,6 +537,10 @@
 
     // Append toggle first so it replaces the left-side dot visually
     if (toggle) indicator.appendChild(toggle);
+    if (reminderBtn) indicator.appendChild(reminderBtn);
+    if (ackBtn) indicator.appendChild(ackBtn);
+    if (debugBtn) indicator.appendChild(debugBtn);
+    if (settingsBtn) indicator.appendChild(settingsBtn);
     indicator.appendChild(dot);
     indicator.appendChild(label);
     indicator.appendChild(sub);
@@ -338,6 +548,9 @@
     // Append indicator to document and apply saved toggle state
     indicatorDoc.body.appendChild(indicator);
     try { applyToggleState(getToggleEnabled()); } catch (e) {}
+    try { updateReminderButtonState(reminderBtn); } catch (e) {}
+    try { updateAckButtonState(ackBtn); } catch (e) {}
+    try { if (settingsPanel) indicatorDoc.body.appendChild(settingsPanel); } catch (e) {}
     return indicator;
   }
 
@@ -505,27 +718,64 @@
     if (!bar) {
       bar = indicator.ownerDocument.createElement('div');
       bar.className = 'agresso-autosave-timer';
+      // Ensure the bar has sensible sizing so transform-based animation is visible
+      try {
+        bar.style.display = 'block';
+        // initialize at 0 width so JS-driven transitions animate reliably
+        bar.style.width = '0px';
+        bar.style.height = '6px';
+        bar.style.background = '#22c55e';
+        bar.style.transformOrigin = 'left';
+      } catch (e) {}
       indicator.appendChild(bar);
     }
     timerBar = bar;
     return bar;
   }
 
+  function getTimerRemainingMs() {
+    try {
+      if (timerStartedAt && timerDuration) {
+        const elapsed = Date.now() - timerStartedAt;
+        return Math.max(800, timerDuration - elapsed);
+      }
+    } catch (e) {}
+    return timerDuration || IDLE_TIMEOUT_MS;
+  }
+
   function resetTimerBar(durationMs) {
     const bar = ensureTimerBar();
+    // Disable any CSS animations/transforms that may conflict
+    try { bar.style.animation = 'none'; } catch (e) {}
+    try { bar.style.transform = 'none'; } catch (e) {}
     bar.style.transition = 'none';
-    bar.style.width = '0%';
+    // initialize to 0px (not percent) so the pixel delta is definite
+    bar.style.width = '0px';
     // force reflow
     // eslint-disable-next-line no-unused-expressions
     bar.offsetWidth;
+    // Determine target width in pixels from the indicator/container so
+    // percent-based computed widths don't interfere with transition.
+    let targetPx = null;
+    try {
+      const parent = bar.parentElement || bar.ownerDocument.body;
+      const pw = (parent && parent.clientWidth) || bar.offsetWidth || 0;
+      targetPx = `${pw}px`;
+    } catch (e) {
+      targetPx = '100%';
+    }
+    // Use inline transition so it takes precedence and animates from 0px->targetPx
+    try { bar.style.willChange = 'width'; } catch (e) {}
     bar.style.transition = `width ${durationMs}ms linear`;
-    bar.style.width = '100%';
+    // Trigger the width change to start the animation
+    bar.style.width = targetPx;
   }
 
   function stopTimerBar() {
     const bar = timerBar || ensureTimerBar();
+    try { bar.style.animation = 'none'; } catch (e) {}
     bar.style.transition = 'none';
-    bar.style.width = '0%';
+    bar.style.width = '0px';
   }
 
   function findSaveButton() {
@@ -543,6 +793,9 @@
 
   function setIndicator(state, labelText, subText) {
     const indicator = ensureIndicator();
+    // Preserve whether the indicator currently has the period-end marker
+    const hadPeriodMarker = indicator.classList.contains('agresso-period-end');
+
     indicator.classList.remove(
       'agresso-saving',
       'agresso-saved',
@@ -561,6 +814,183 @@
     }
 
     positionIndicatorNearSaveButton();
+    // If we just reached a saved state, clear any period-end highlight
+    try {
+      if (state === 'saved') {
+        // Only clear the period-end reminder when the report Status is set to 'Klar'
+        try {
+          const isKlar = isReportStatusKlar();
+          if (isKlar) {
+            try { indicator.classList.remove('agresso-period-end'); } catch (e) {}
+            try {
+              const bar = indicator.querySelector('.agresso-autosave-timer');
+              if (bar) {
+                try { bar.classList.remove('agresso-period-moving'); } catch (e) {}
+                bar.style.background = '#22c55e';
+                bar.style.boxShadow = 'none';
+              }
+            } catch (e) {}
+            try { localStorage.removeItem(PERIOD_NOTIFY_KEY); } catch (e) {}
+            try { localStorage.removeItem(PERIOD_ACK_KEY); } catch (e) {}
+            try { if (periodStatusRefreshTimer) { clearInterval(periodStatusRefreshTimer); periodStatusRefreshTimer = null; } } catch (e) {}
+              try { if (periodHighlightEnforcer) { clearInterval(periodHighlightEnforcer); periodHighlightEnforcer = null; } } catch (e) {}
+            try { highlightStatusField(false); } catch (e) {}
+            // Remove any persistent submit banners
+            try { const b = document.getElementById('agresso-period-banner'); if (b && b.parentNode) b.parentNode.removeChild(b); } catch (e) {}
+            try { if (window.top && window.top.document && window.top !== window) { const bt = window.top.document.getElementById('agresso-period-banner'); if (bt && bt.parentNode) bt.parentNode.removeChild(bt); } } catch (e) {}
+          } else {
+            // If we were displaying the period marker before this state change,
+            // reapply it unless the report is confirmed 'Klar'. This avoids the
+            // page briefly removing our visual reminder during normal UI updates.
+            try {
+              if (hadPeriodMarker) {
+                try { indicator.classList.add('agresso-period-end'); } catch (e) {}
+                try {
+                  const bar = indicator.querySelector('.agresso-autosave-timer');
+                  if (bar) {
+                    try { bar.classList.add('agresso-period-moving'); try { resetTimerBar(getTimerRemainingMs()); } catch (e2) {} } catch (e) {}
+                    bar.style.background = '#d9534f';
+                    bar.style.boxShadow = '0 0 6px rgba(217,83,79,0.6)';
+                  }
+                } catch (e) {}
+                try { indicator.style.border = '2px solid rgba(217,83,79,0.9)'; } catch (e) {}
+                try { indicator.style.background = 'linear-gradient(180deg, rgba(36,41,50,0.95), rgba(30,25,28,0.95))'; } catch (e) {}
+              }
+            } catch (e) {
+              // ignore
+            }
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    // If the indicator is currently marked as period-end, ensure the subtext
+    // clearly instructs the user to submit the timereport.
+    try {
+      const subEl = indicator.querySelector('.agresso-autosave-sub');
+      if (indicator.classList.contains('agresso-period-end')) {
+        if (subEl) subEl.textContent = '- Submit time report!';
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function isReportStatusKlar() {
+    try {
+      const docs = getAllDocuments();
+      for (const doc of docs) {
+        try {
+          // Look for nearby label or heading that mentions 'Status'
+          const labelNode = Array.from(doc.querySelectorAll('label, th, td, div, span'))
+            .find(n => /\bstatus\b/i.test((n.textContent||'').trim()));
+          if (labelNode) {
+            // Try to find a select/input in the same row or parent
+            const container = labelNode.closest('tr') || labelNode.parentElement || doc;
+            const input = container.querySelector('select, input[type="text"], input');
+            if (input) {
+              const val = (input.value || (input.selectedOptions && input.selectedOptions[0] && input.selectedOptions[0].text) || '').trim().toLowerCase();
+              if (val.includes('klar')) return true;
+            }
+          }
+
+          // Fallback: check any select's selected option text for 'Klar'
+          const selects = Array.from(doc.querySelectorAll('select'));
+          for (const s of selects) {
+            try {
+              const selText = (s.selectedOptions && s.selectedOptions[0] && s.selectedOptions[0].text) || (s.options && s.options[s.selectedIndex] && s.options[s.selectedIndex].text) || '';
+              if ((selText||'').toLowerCase().includes('klar')) return true;
+            } catch (e) {}
+          }
+        } catch (e) {
+          // ignore per-document errors
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+    return false;
+  }
+
+  function getReportStatusText() {
+    try {
+      const docs = getAllDocuments();
+      for (const doc of docs) {
+        try {
+          const labelNode = Array.from(doc.querySelectorAll('label, th, td, div, span'))
+            .find(n => /\bstatus\b/i.test((n.textContent||'').trim()));
+          if (labelNode) {
+            const container = labelNode.closest('tr') || labelNode.parentElement || doc;
+            const input = container.querySelector('select, input[type="text"], input');
+            if (input) {
+              // selected option text or input value
+              const selText = (input.selectedOptions && input.selectedOptions[0] && input.selectedOptions[0].text) || input.value || '';
+              if (selText) return (selText || '').trim();
+            }
+          }
+
+          const selects = Array.from(doc.querySelectorAll('select'));
+          for (const s of selects) {
+            try {
+              const selText = (s.selectedOptions && s.selectedOptions[0] && s.selectedOptions[0].text) || (s.options && s.options[s.selectedIndex] && s.options[s.selectedIndex].text) || '';
+              if (selText) return (selText || '').trim();
+            } catch (e) {}
+          }
+        } catch (e) {
+          // ignore per-document errors
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+    return null;
+  }
+
+  function refreshPeriodIndicatorStatus() {
+    try {
+      const indicator = ensureIndicator();
+      if (!indicator.classList.contains('agresso-period-end')) return;
+      const lang = getReminderLang();
+      const base = lang === 'en' ? 'Today is the last day of the period — submit your time report.' : 'Idag är sista dagen för perioden – skicka in din tidrapport.';
+      const statusText = getReportStatusText();
+      const sub = statusText ? `${base} • Status: ${statusText}` : base;
+      try {
+        const subEl = indicator.querySelector('.agresso-autosave-sub');
+        if (subEl) subEl.textContent = sub;
+      } catch (e) {}
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function highlightStatusField(highlight) {
+    try {
+      const docs = getAllDocuments();
+      for (const doc of docs) {
+        try {
+          const labelNode = Array.from(doc.querySelectorAll('label, th, td, div, span'))
+            .find(n => /\bstatus\b/i.test((n.textContent||'').trim()));
+          if (!labelNode) continue;
+          const container = labelNode.closest('tr') || labelNode.parentElement || doc;
+          const input = container.querySelector('select, input[type="text"], input');
+          if (input) {
+            if (highlight) {
+              try { input.style.boxShadow = '0 0 8px rgba(217,83,79,0.65)'; input.style.background = '#fff7f7'; } catch (e) {}
+            } else {
+              try { input.style.boxShadow = ''; input.style.background = ''; } catch (e) {}
+            }
+            return true;
+          }
+        } catch (e) {
+          // ignore per-doc
+        }
+      }
+    } catch (e) {}
+    return false;
   }
 
   function isDeletionButton(target) {
@@ -714,10 +1144,7 @@
     setIndicator('saving', 'Saving…', `Using ${SHORTCUT_LABEL}`);
     triggerShortcutSave();
 
-    // Silent fallback: if the page ignores the shortcut, attempt a button click shortly after.
-    window.setTimeout(() => {
-      clickSaveButtonsFallback();
-    }, 250);
+    // Note: removed fallback button-click logic to avoid CSP/page errors.
 
     lastSaveAt = Date.now();
     startDialogSweep('autosave');
@@ -793,78 +1220,7 @@
     console.info(LOG_PREFIX, 'Shortcut events dispatched', { shortcut: SHORTCUT_LABEL, targets: targets.size, combos: SHORTCUT_COMBOS.length });
   }
 
-  function clickSaveButtonsFallback() {
-    const btn = findSaveButton();
-    if (btn) {
-      // reset miss log counter when we actually find a button
-      fallbackMissLogged = false;
-      console.info(LOG_PREFIX, 'Fallback clicking save button');
-      try {
-        btn.click();
-      } catch (e) {
-        // ignore
-      }
-      return true;
-    }
-
-    // Before warning, check whether anything actually looks save-related (dialog, save keywords, or dirty row).
-    const docs = getAllDocuments();
-    let sawSaveCandidate = false;
-    try {
-      for (const doc of docs) {
-        if (!doc) continue;
-        // Any explicit save button candidate in DOM?
-        try {
-          if (doc.querySelector(SAVE_BUTTON_SELECTORS.join(','))) {
-            sawSaveCandidate = true;
-            break;
-          }
-        } catch (e) {
-          // ignore selector errors
-        }
-
-        // Any dialog-like element with save keywords?
-        try {
-          const dialog = doc.querySelector('[role="dialog"], .modal, .k-window, .notification, .alert, .k-dialog');
-          if (dialog && isSaveDialog(dialog)) {
-            sawSaveCandidate = true;
-            break;
-          }
-        } catch (e) {
-          // ignore
-        }
-
-        // Body text contains save-like keywords?
-        try {
-          const bodyText = (doc.body && (doc.body.innerText || doc.body.textContent || '')).toLowerCase();
-          if (bodyText && SAVE_DIALOG_KEYWORDS.some((kw) => bodyText.includes(kw))) {
-            sawSaveCandidate = true;
-            break;
-          }
-        } catch (e) {
-          // ignore
-        }
-      }
-    } catch (e) {
-      // ignore
-    }
-
-    // Also consider a dirty row present as a valid trigger for attempting a fallback click
-    if (!sawSaveCandidate && getDirtyRow()) {
-      sawSaveCandidate = true;
-    }
-
-    if (!sawSaveCandidate) {
-      // Nothing indicating a save is pending — skip noisy warning.
-      return false;
-    }
-
-    if (!fallbackMissLogged) {
-      console.warn(LOG_PREFIX, 'Fallback save button not found');
-      fallbackMissLogged = true;
-    }
-    return false;
-  }
+  // Fallback save click logic removed (caused errors on some pages/CSP).
 
   function isVisible(el) {
     if (!el) {
@@ -1083,6 +1439,1424 @@
     console.debug(LOG_PREFIX, 'Started dialog sweep', { reason, durationMs: DIALOG_SWEEP_MS });
   }
 
+  // --- Period end detection and notification ---
+  const PERIOD_NOTIFY_KEY = 'agresso_period_notify_date';
+  const REMINDER_ENABLED_KEY = 'agresso_period_notify_enabled';
+  const REMINDER_LANG_KEY = 'agresso_period_notify_lang';
+  const PERIOD_OVERRIDE_KEY = 'agresso_period_override';
+  const PERIOD_ACK_KEY = 'agresso_period_ack_date';
+
+  function getReminderEnabled() {
+    try {
+      const v = localStorage.getItem(REMINDER_ENABLED_KEY);
+      if (v === null) return true;
+      return v === '1' || v === 'true';
+    } catch (e) {
+      return true;
+    }
+  }
+
+  function setReminderEnabled(enabled) {
+    try { localStorage.setItem(REMINDER_ENABLED_KEY, enabled ? '1' : '0'); } catch (e) {}
+  }
+
+  function getReminderLang() {
+    try { return localStorage.getItem(REMINDER_LANG_KEY) || 'sv'; } catch (e) { return 'sv'; }
+  }
+
+  function setReminderLang(lang) {
+    try { localStorage.setItem(REMINDER_LANG_KEY, String(lang)); } catch (e) {}
+  }
+
+  function cycleReminderLang() {
+    const cur = getReminderLang();
+    const next = cur === 'en' ? 'sv' : 'en';
+    setReminderLang(next);
+    return next;
+  }
+
+  function getOverrideDate() {
+    try {
+      const v = localStorage.getItem(PERIOD_OVERRIDE_KEY);
+      if (!v) return null;
+      const d = parseDateFlexible(v);
+      try { console.info(LOG_PREFIX, 'getOverrideDate: raw override', v, 'parsed', d); } catch (e) {}
+      return d;
+    } catch (e) { return null; }
+  }
+
+  function setOverrideDate(v) {
+    try { localStorage.setItem(PERIOD_OVERRIDE_KEY, String(v)); } catch (e) {}
+  }
+
+  function clearOverrideDate() {
+    try { localStorage.removeItem(PERIOD_OVERRIDE_KEY); } catch (e) {}
+  }
+
+  function updateReminderButtonState(btn) {
+    try {
+      if (!btn) return;
+      const enabled = getReminderEnabled();
+      const lang = getReminderLang();
+      try { btn.setAttribute('aria-pressed', String(enabled)); } catch (e) {}
+      btn.title = enabled ? (lang === 'en' ? 'Reminder: On (en) - Shift+click to switch language' : 'Påminnelse: På (sv) - Shift+click för språk') : (lang === 'en' ? 'Reminder: Off - click to enable' : 'Påminnelse: Av - klicka för att aktivera');
+      btn.style.opacity = enabled ? '1' : '0.45';
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function getPeriodAckDate() {
+    try { return localStorage.getItem(PERIOD_ACK_KEY); } catch (e) { return null; }
+  }
+
+  function setPeriodAckDate(v) {
+    try { localStorage.setItem(PERIOD_ACK_KEY, String(v)); } catch (e) {}
+  }
+
+  function clearPeriodAckDate() {
+    try { localStorage.removeItem(PERIOD_ACK_KEY); } catch (e) {}
+  }
+
+  function updateAckButtonState(btn) {
+    try {
+      const indicator = ensureIndicator();
+      const b = btn || indicator.querySelector('.agresso-ack-btn');
+      if (!b) return;
+      const ack = getPeriodAckDate();
+      try { b.setAttribute('aria-pressed', String(!!ack)); } catch (e) {}
+      b.style.opacity = ack ? '1' : '0.55';
+      b.title = ack ? 'Acknowledged (click to undo)' : 'Acknowledge reminder (click to mark)';
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function parseDateFlexible(s) {
+    if (!s) return null;
+    s = s.trim();
+    // ISO yyyy-mm-dd
+    const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (iso) {
+      return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+    }
+
+    // dd/mm/yyyy or dd.mm.yyyy or dd mm yyyy
+    const parts = /^(\d{1,2})[\/\.\s](\d{1,2})[\/\.\s](\d{2,4})$/.exec(s);
+    if (parts) {
+      let day = Number(parts[1]);
+      let month = Number(parts[2]);
+      let year = Number(parts[3]);
+      if (year < 100) year += 2000;
+      return new Date(year, month - 1, day);
+    }
+
+    // dd/mm or dd.mm (no year) -> assume current year
+    const twoPart = /^(\d{1,2})[\/\.\s](\d{1,2})$/.exec(s);
+    if (twoPart) {
+      const day = Number(twoPart[1]);
+      const month = Number(twoPart[2]);
+      const year = (new Date()).getFullYear();
+      return new Date(year, month - 1, day);
+    }
+
+    // Try Date.parse fallback (e.g., "1 January 2025")
+    const parsed = Date.parse(s);
+    if (!Number.isNaN(parsed)) {
+      return new Date(parsed);
+    }
+    return null;
+  }
+
+  function findPeriodEndDate() {
+    try {
+      console.info(LOG_PREFIX, 'findPeriodEndDate: start scan');
+      // Quick deterministic match: look for header DIVs that explicitly contain
+      // today's day/month (e.g. "09/01") across all reachable documents (top + frames).
+      try {
+        const now = new Date();
+        const td = now.getDate();
+        const tm = now.getMonth() + 1;
+        const tokenRe = new RegExp('\\b0?' + td + '[\\\\\/.]0?' + tm + '\\b');
+        const docs = getAllDocuments();
+        for (const doc of docs) {
+          try {
+            const candidates = Array.from(doc.querySelectorAll('.DivOverflowNoWrap, .Ellipsis, .Separator'));
+            for (const n of candidates) {
+              try {
+                const raw = (n.dataset && n.dataset.originaltext) || (n.getAttribute && n.getAttribute('title')) || n.textContent || n.innerHTML || '';
+                const cleaned = String(raw).replace(/&lt;br\s*\/?&gt;/gi, ' ').replace(/<br\s*\/?>(\s*)/gi, ' ').trim();
+                if (!tokenRe.test(cleaned)) continue;
+                const hdr = n.closest && n.closest('th,td');
+                if (hdr && typeof hdr.cellIndex === 'number') {
+                  const inferredYear = (new Date()).getFullYear();
+                  const dt = new Date(inferredYear, tm - 1, td);
+                  console.info(LOG_PREFIX, 'findPeriodEndDate: detected today by direct div match', { raw: cleaned, inFrame: doc !== document, columnIndex: hdr.cellIndex, date: dt });
+                  return dt;
+                }
+              } catch (e) {}
+            }
+          } catch (e) {}
+        }
+      } catch (e) {}
+      const indicatorEl = document.getElementById('agresso-autosave-indicator');
+      let nodes = Array.from(document.querySelectorAll('h1,h2,h3,p,div,span,label,td,th'));
+      if (indicatorEl) {
+        nodes = nodes.filter(n => !indicatorEl.contains(n));
+      }
+      const dateRangeIso = /(\d{4}-\d{2}-\d{2})\s*[–—-]\s*(\d{4}-\d{2}-\d{2})/;
+      const dateRangeSlashed = /(\d{1,2}[\/\.\s]\d{1,2}[\/\.\s]\d{2,4})\s*[–—-]\s*(\d{1,2}[\/\.\s]\d{1,2}[\/\.\s]\d{2,4})/;
+      const monthNameRange = /(\d{1,2}\s+[A-Za-zåäöÅÄÖ]+\s+\d{4})\s*[–—-]\s*(\d{1,2}\s+[A-Za-zåäöÅÄÖ]+\s+\d{4})/;
+
+      // Prefer elements that mention 'period' or similar
+      const priority = nodes.filter((n) => /period|perioden|vecka|veckor|tidrapport/i.test((n.textContent||'')));
+      const searchList = priority.length ? priority : nodes;
+
+      for (const el of searchList) {
+        if (indicatorEl && indicatorEl.contains(el)) continue;
+        const txt = (el.textContent || '').trim();
+        let m = dateRangeIso.exec(txt);
+        if (m) {
+          console.info(LOG_PREFIX, 'findPeriodEndDate: matched iso range in element', txt.slice(0,200));
+          try { console.info(LOG_PREFIX, 'findPeriodEndDate: matched element outer', (el.outerHTML||'').slice(0,200)); } catch (e) {}
+          return parseDateFlexible(m[2]);
+        }
+        m = dateRangeSlashed.exec(txt);
+        if (m) {
+          console.info(LOG_PREFIX, 'findPeriodEndDate: matched slashed range in element', txt.slice(0,200));
+          try { console.info(LOG_PREFIX, 'findPeriodEndDate: matched element outer', (el.outerHTML||'').slice(0,200)); } catch (e) {}
+          return parseDateFlexible(m[2]);
+        }
+        m = monthNameRange.exec(txt);
+        if (m) {
+          console.info(LOG_PREFIX, 'findPeriodEndDate: matched month name range in element', txt.slice(0,200));
+          try { console.info(LOG_PREFIX, 'findPeriodEndDate: matched element outer', (el.outerHTML||'').slice(0,200)); } catch (e) {}
+          return parseDateFlexible(m[2]);
+        }
+      }
+
+      // Deterministic header `th` scan: look for th elements containing
+      // DivOverflowNoWrap header DIVs with date tokens (e.g. "Fre<br>09/01").
+      try {
+        const ths = Array.from(document.querySelectorAll('th'));
+        if (ths.length) {
+          const headerDates = [];
+          const dateTokenSimple = /\b(\d{1,2})[\/\.](\d{1,2})\b/;
+          const isRedColorLocal = (colorStr) => {
+            if (!colorStr) return false;
+            const rgb = /rgb\s*\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)/i.exec(colorStr);
+            if (rgb) {
+              const r = Number(rgb[1]), g = Number(rgb[2]), b = Number(rgb[3]);
+              return r > 140 && r > g + 30 && r > b + 30;
+            }
+            const hex = /#([0-9a-f]{6}|[0-9a-f]{3})/i.exec(colorStr);
+            if (hex) {
+              let h = hex[1]; if (h.length === 3) h = h.split('').map(c=>c+c).join('');
+              const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
+              return r > 140 && r > g + 30 && r > b + 30;
+            }
+            return false;
+          };
+
+          ths.forEach((th) => {
+            try {
+              const div = th.querySelector && th.querySelector('.DivOverflowNoWrap, .Ellipsis, .Separator');
+              if (!div) return;
+              const raw = ((div.dataset && div.dataset.originaltext) || div.getAttribute('title') || div.textContent || div.innerHTML || '').toString().replace(/<br\s*\/?>(\s*)/gi,' ').trim();
+              const m = dateTokenSimple.exec(raw);
+              if (m) {
+                // read computed color if possible
+                let color = '';
+                try { color = (window.getComputedStyle && window.getComputedStyle(div).color) || div.style && div.style.color || ''; } catch (e) {}
+                headerDates.push({ th, day: Number(m[1]), month: Number(m[2]), raw, color, idx: th.cellIndex });
+              }
+            } catch (e) {}
+          });
+
+          if (headerDates.length) {
+            // choose the rightmost non-Sum header (closest to Sum on the left)
+            headerDates.sort((a,b) => (a.idx || 0) - (b.idx || 0));
+            // find index of Sum header if present
+            const sumTh = Array.from(document.querySelectorAll('th')).find(t => /\b(sum|summa|\u03a3)\b/i.test((t.textContent||t.getAttribute('title')||'').toLowerCase()));
+            const sumIdx = sumTh ? sumTh.cellIndex : null;
+            // iterate left-to-right up to sumIdx or choose rightmost
+            let candidate = null;
+            if (sumIdx !== null) {
+              for (let i = headerDates.length - 1; i >= 0; i--) {
+                const h = headerDates[i];
+                if (h.idx >= sumIdx) continue; // skip anything at/after sum
+                if (isRedColorLocal(h.color)) continue;
+                candidate = h; break;
+              }
+            } else {
+              // no sum found: pick rightmost non-red
+              for (let i = headerDates.length - 1; i >= 0; i--) {
+                const h = headerDates[i]; if (isRedColorLocal(h.color)) continue; candidate = h; break;
+              }
+            }
+            if (!candidate) candidate = headerDates[headerDates.length - 1];
+            if (candidate) {
+              const inferredYear = (function(){ try { const explicit = Array.from(document.querySelectorAll('input,span,div')).map(n=>(n.value||n.textContent||'').trim()).find(v=>/^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v)); if (explicit){ const d=parseDateFlexible(explicit); if (d) return d.getFullYear(); } } catch(e){} return (new Date()).getFullYear(); })();
+              const dt = new Date(inferredYear, candidate.month - 1, candidate.day);
+              console.info(LOG_PREFIX, 'findPeriodEndDate: detected end by deterministic th-scan', { raw: candidate.raw, columnIndex: candidate.idx, date: dt });
+              return dt;
+            }
+          }
+        }
+      } catch (e) {}
+
+      // New: scan the entire table for day/date tokens (handles layouts where first row isn't the date row)
+      try {
+        // Prefer the table inside the 'Daglig tidregistrering' section if present
+        const heading = Array.from(document.querySelectorAll('h1,h2,h3,legend,div,span,th'))
+          .find(el => /Arbetstimmar|Daglig tidregistrering|Tidrapport/i.test(el.textContent||''));
+        const tableRoot = heading ? (heading.closest('section') || heading.closest('fieldset') || heading.closest('table') || document.body) : document.body;
+        try { console.info(LOG_PREFIX, 'findPeriodEndDate: heading found', !!heading, heading && (heading.textContent||'').slice(0,120)); } catch (e) {}
+        try { console.info(LOG_PREFIX, 'findPeriodEndDate: tableRoot selected', tableRoot && (tableRoot.tagName || 'body')); } catch (e) {}
+        // Choose the most likely table that contains date tokens
+        const candidateTables = Array.from(tableRoot.querySelectorAll('table'));
+        const dateTokenRe = /\b(\d{1,2})[\/\.](\d{1,2})\b/;
+        let tbl2 = null;
+        const matches = [];
+        // Direct scan: look for floating header DIVs (DivOverflowNoWrap etc.) that contain date tokens
+        try {
+          const floating = Array.from(document.querySelectorAll('.DivOverflowNoWrap, .Ellipsis, .Separator'))
+            .filter(n => {
+              try {
+                const t = (n.textContent || '') + '|' + (n.getAttribute && n.getAttribute('title') || '') + '|' + (n.dataset && n.dataset.originaltext || '') + '|' + (n.innerHTML || '');
+                return dateTokenRe.test(t);
+              } catch (e) { return false; }
+            });
+          if (floating.length) {
+            try { console.info(LOG_PREFIX, 'findPeriodEndDate: floating headers count', floating.length); } catch (e) {}
+            for (const n of floating) {
+              try {
+                const hdrCell = n.closest && n.closest('th,td');
+                if (!hdrCell) continue;
+                const raw = (n.getAttribute && n.getAttribute('title') || n.dataset && n.dataset.originaltext || n.textContent || n.innerHTML || '').replace(/<br\s*\/?>(\s*)/gi, ' ').trim();
+                const m = dateTokenRe.exec(raw);
+                if (m) {
+                  let inferredYear = (new Date()).getFullYear();
+                  try {
+                    const explicit = Array.from(document.querySelectorAll('input,span,div')).map(x => (x.value||x.textContent||'').trim()).find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
+                    if (explicit) {
+                      const d = parseDateFlexible(explicit);
+                      if (d) inferredYear = d.getFullYear();
+                    }
+                  } catch (e) {}
+                  const dt = new Date(inferredYear, Number(m[2]) - 1, Number(m[1]));
+                  console.info(LOG_PREFIX, 'findPeriodEndDate: detected end by floating header', { raw, columnIndex: hdrCell.cellIndex, date: dt });
+                  return dt;
+                }
+              } catch (e) {}
+            }
+          }
+        } catch (e) {}
+        if (candidateTables.length) {
+          let best = null;
+          let bestScore = 0;
+          candidateTables.forEach((t) => {
+            try {
+              const txt = (t.innerText || '').trim();
+              let score = 0;
+              if (dateTokenRe.test(txt)) score += 10;
+              // count day tokens
+              const dayMatches = txt.match(/\b\d{1,2}[\/\.]\d{1,2}\b/g) || [];
+              score += dayMatches.length;
+              // prefer tables with multiple columns/rows
+              const cols = t.querySelectorAll('tr:first-child th, tr:first-child td').length || 0;
+              const rows = t.querySelectorAll('tr').length || 0;
+              score += Math.min(10, cols) + Math.min(5, rows);
+              if (score > bestScore) { bestScore = score; best = t; }
+            } catch (e) {}
+          });
+          try { console.info(LOG_PREFIX, 'findPeriodEndDate: candidateTables count', candidateTables.length, 'bestScore', bestScore, 'bestTable', !!best); } catch (e) {}
+          tbl2 = best || candidateTables[0];
+        } else {
+          try { console.info(LOG_PREFIX, 'findPeriodEndDate: no candidateTables found under tableRoot'); } catch (e) {}
+          tbl2 = tableRoot.querySelector('table');
+        }
+
+        // New heuristic: locate a header cell labelled 'Sum' (or variants) and scan left
+        // from that column. If a column's displayed text is styled red, skip it;
+        // the first non-red column to the left is assumed to be the last workday.
+        try {
+          if (tbl2) {
+            let headerRow = tbl2.querySelector('thead tr') || tbl2.querySelector('tr');
+            // If the chosen header row looks too small, try a few top rows to find a better header
+            try {
+              if (headerRow) {
+                const topRows = Array.from(tbl2.querySelectorAll('tr'));
+                if ((headerRow.querySelectorAll('th,td').length || 0) < 2) {
+                  for (let ri = 0; ri < Math.min(6, topRows.length); ri++) {
+                    const r = topRows[ri];
+                    if ((r.querySelectorAll('th,td').length || 0) > 2) { headerRow = r; break; }
+                  }
+                }
+              }
+            } catch (e) {}
+            if (headerRow) {
+              const headers = Array.from(headerRow.querySelectorAll('th,td'));
+              const sumIdx = headers.findIndex(h => /\b(sum|summa|\u03a3)\b/i.test((h.textContent||'').trim()));
+              if (sumIdx > 0) {
+                // helper to detect red-ish colors
+                const isRedColor = (colorStr) => {
+                  if (!colorStr) return false;
+                  // colorStr like 'rgb(217, 83, 79)' or '#d9534f'
+                  const rgb = /rgb\s*\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)/i.exec(colorStr);
+                  if (rgb) {
+                    const r = Number(rgb[1]), g = Number(rgb[2]), b = Number(rgb[3]);
+                    return r > 140 && r > g + 30 && r > b + 30;
+                  }
+                  const hex = /#([0-9a-f]{6}|[0-9a-f]{3})/i.exec(colorStr);
+                  if (hex) {
+                    let h = hex[1];
+                    if (h.length === 3) h = h.split('').map(c=>c+c).join('');
+                    const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
+                    return r > 140 && r > g + 30 && r > b + 30;
+                  }
+                  return false;
+                };
+
+                // iterate left from sumIdx - 1, look for a non-red column
+                for (let ci = sumIdx - 1; ci >= 0; ci--) {
+                  try {
+                    const headerCell = headers[ci];
+                    // quick check on header color
+                    const headerColor = headerCell && (window.getComputedStyle ? window.getComputedStyle(headerCell).color : headerCell.style && headerCell.style.color);
+                    let colIsRed = isRedColor(headerColor);
+
+                    // If header not red, inspect up to first 6 data rows in that column
+                    if (!colIsRed) {
+                      const rows = Array.from(tbl2.querySelectorAll('tr'));
+                      let checked = 0;
+                      for (let r = 1; r < rows.length && checked < 6; r++) {
+                        const cell = rows[r].cells && rows[r].cells[ci];
+                        if (!cell) continue;
+                        const txt = (cell.textContent || '').trim();
+                        if (!txt) continue;
+                        checked++;
+                        const cellColor = window.getComputedStyle ? window.getComputedStyle(cell).color : cell.style && cell.style.color;
+                        if (isRedColor(cellColor)) {
+                          colIsRed = true;
+                          break;
+                        }
+                      }
+                    }
+
+                    if (!colIsRed) {
+                      // Try to parse a date token from the header cell, its attributes, or inner HTML
+                      let txt = '';
+                      try {
+                        txt = (headerCell && (headerCell.textContent || headerCell.getAttribute('title') || headerCell.dataset && headerCell.dataset.originaltext || headerCell.innerHTML)) || '';
+                        // Replace any <br> tags with spaces for parsing
+                        txt = String(txt).replace(/<br\s*\/?>(\s*)/gi, ' ');
+                        txt = txt.trim();
+                      } catch (e) { txt = (headerCell && headerCell.textContent) || ''; }
+                      const m = dateTokenRe.exec(txt);
+                      if (m) {
+                        // infer year similar to other heuristics
+                        let inferredYear = (new Date()).getFullYear();
+                        try {
+                          const explicit = Array.from(document.querySelectorAll('input,span,div')).map(n => (n.value||n.textContent||'').trim()).find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
+                          if (explicit) {
+                            const d = parseDateFlexible(explicit);
+                            if (d) inferredYear = d.getFullYear();
+                          } else {
+                            const bodyMatch = (document.body && document.body.innerText) || '';
+                            const bm = /(\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4})/.exec(bodyMatch);
+                            if (bm) {
+                              const d = parseDateFlexible(bm[1]);
+                              if (d) inferredYear = d.getFullYear();
+                            }
+                          }
+                        } catch (e) {}
+                        const dt = new Date(inferredYear, Number(m[2]) - 1, Number(m[1]));
+                        console.info(LOG_PREFIX, 'findPeriodEndDate: detected end by Sum-left red-scan', { headerText: txt, columnIndex: ci, date: dt });
+                        return dt;
+                      }
+                      // if header doesn't include explicit date token, attempt to find any day token inside header or first data cell
+                      try {
+                        const maybe = (headerCell && (headerCell.textContent || headerCell.getAttribute('title') || headerCell.dataset && headerCell.dataset.originaltext || headerCell.innerHTML)) || '';
+                        const maybeClean = String(maybe).replace(/<br\s*\/?>(\s*)/gi, ' ').trim();
+                        const dm = /\b(\d{1,2})\b/.exec(maybeClean);
+                        if (dm) {
+                          let inferredYear = (new Date()).getFullYear();
+                          try {
+                            const explicit = Array.from(document.querySelectorAll('input,span,div')).map(n => (n.value||n.textContent||'').trim()).find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
+                            if (explicit) {
+                              const d = parseDateFlexible(explicit);
+                              if (d) inferredYear = d.getFullYear();
+                            }
+                          } catch (e) {}
+                          const day = Number(dm[1]);
+                          // attempt to infer month by looking rightmost date-like header before sum
+                          let month = null;
+                          for (let k = ci; k >= Math.max(0, ci - 8); k--) {
+                            try {
+                              const hhRaw = headers[k] && (headers[k].textContent || headers[k].getAttribute('title') || headers[k].dataset && headers[k].dataset.originaltext || headers[k].innerHTML) || '';
+                              const hh = String(hhRaw).replace(/<br\s*\/?>(\s*)/gi, ' ').trim();
+                              const mm = /\b(\d{1,2})[\/\.](\d{1,2})\b/.exec(hh);
+                              if (mm) { month = Number(mm[2]); break; }
+                            } catch (e) {}
+                          }
+                          if (!month) month = (new Date()).getMonth() + 1;
+                          const dt = new Date(inferredYear, month - 1, day);
+                          console.info(LOG_PREFIX, 'findPeriodEndDate: detected end by Sum-left day-scan', { headerText: maybe, columnIndex: ci, date: dt });
+                          return dt;
+                        }
+                      } catch (e) {}
+                    }
+                  } catch (e) {
+                    // continue to next column on any error
+                  }
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // ignore Sum-left heuristic errors
+        }
+
+        // Fallback: if Sum-left didn't return, try scanning header cells for date tokens
+        try {
+          if (tbl2) {
+            const headerRowCandidates = Array.from(tbl2.querySelectorAll('tr')).slice(0, 6);
+            let headerCells = [];
+            for (const r of headerRowCandidates) {
+              const cols = Array.from(r.querySelectorAll('th,td'));
+              if (cols.length > headerCells.length) headerCells = cols;
+            }
+            if (headerCells.length) {
+              // collect date-like header cells with their column index
+              const hdrs = headerCells.map((h, idx) => {
+                let txt = '';
+                try { txt = (h.textContent || h.getAttribute('title') || h.dataset && h.dataset.originaltext || h.innerHTML) || ''; txt = String(txt).replace(/<br\s*\/?>(\s*)/gi, ' ').trim(); } catch (e) { txt = (h.textContent||'').trim(); }
+                const m = dateTokenRe.exec(txt);
+                return { el: h, idx, txt, hasDate: !!m };
+              }).filter(x => x.hasDate);
+
+              // iterate right-to-left across detected date headers and return first non-red column
+              for (let i = hdrs.length - 1; i >= 0; i--) {
+                const info = hdrs[i];
+                const ci = info.idx;
+                let colIsRed = false;
+                try {
+                  const headerColor = info.el && (window.getComputedStyle ? window.getComputedStyle(info.el).color : info.el.style && info.el.style.color);
+                  colIsRed = isRedColor(headerColor);
+                } catch (e) {}
+                if (!colIsRed) {
+                  // inspect a few rows for red text
+                  try {
+                    const rows = Array.from(tbl2.querySelectorAll('tr'));
+                    let checked = 0;
+                    for (let r = 1; r < rows.length && checked < 6; r++) {
+                      const cell = rows[r].cells && rows[r].cells[ci];
+                      if (!cell) continue;
+                      const txt = (cell.textContent || '').trim();
+                      if (!txt) continue;
+                      checked++;
+                      const cellColor = window.getComputedStyle ? window.getComputedStyle(cell).color : cell.style && cell.style.color;
+                      if (isRedColor(cellColor)) { colIsRed = true; break; }
+                    }
+                  } catch (e) {}
+                }
+                if (!colIsRed) {
+                  // parse date from header text
+                  const m2 = dateTokenRe.exec(info.txt);
+                  if (m2) {
+                    let inferredYear = (new Date()).getFullYear();
+                    try {
+                      const explicit = Array.from(document.querySelectorAll('input,span,div')).map(n => (n.value||n.textContent||'').trim()).find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
+                      if (explicit) {
+                        const d = parseDateFlexible(explicit);
+                        if (d) inferredYear = d.getFullYear();
+                      }
+                    } catch (e) {}
+                    const dt = new Date(inferredYear, Number(m2[2]) - 1, Number(m2[1]));
+                    console.info(LOG_PREFIX, 'findPeriodEndDate: detected end by header-scan fallback', { headerText: info.txt, columnIndex: ci, date: dt });
+                    return dt;
+                  }
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // ignore fallback errors
+        }
+        if (matches.length) {
+          // Infer year from any explicit dd/mm/yyyy found on page or in nearby 'Datum i perioden' input
+          let inferredYear = (new Date()).getFullYear();
+          try {
+            const explicit = Array.from(document.querySelectorAll('input,span,div')).map(n => (n.value||n.textContent||'').trim()).find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
+            if (explicit) {
+              const d = parseDateFlexible(explicit);
+              if (d) inferredYear = d.getFullYear();
+            } else {
+              // try previous heuristic: look for any dd/mm/yyyy anywhere
+              const bodyMatch = (document.body && document.body.innerText) || '';
+              const m = /(\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4})/.exec(bodyMatch);
+              if (m) {
+                const d = parseDateFlexible(m[1]);
+                if (d) inferredYear = d.getFullYear();
+              }
+            }
+          } catch (e) {}
+          // Build candidate dates for all matches and choose the latest local date
+          try {
+            const dts = matches.map(ch => new Date(inferredYear, ch.month - 1, ch.day));
+            // Normalize by local date value (strip time)
+            const maxDt = dts.reduce((a,b) => (a > b ? a : b));
+            console.info(LOG_PREFIX, 'findPeriodEndDate: parsed table matches', { matchesCount: matches.length, inferredYear, maxDt });
+            return maxDt;
+          } catch (e) {
+            const chosen = matches[matches.length - 1];
+            const dt = new Date(inferredYear, chosen.month - 1, chosen.day);
+            console.info(LOG_PREFIX, 'findPeriodEndDate: fallback parsed table match', { text: chosen.text, day: chosen.day, month: chosen.month, year: inferredYear, dt, matchesCount: matches.length });
+            return dt;
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      // Fallback: search body text
+      const body = (document.body && document.body.innerText) || '';
+      let m = dateRangeIso.exec(body);
+      if (m) {
+        console.info(LOG_PREFIX, 'findPeriodEndDate: matched iso range in body', m[0].slice(0,200));
+        return parseDateFlexible(m[2]);
+      }
+      m = dateRangeSlashed.exec(body);
+      if (m) {
+        console.info(LOG_PREFIX, 'findPeriodEndDate: matched slashed range in body', m[0].slice(0,200));
+        return parseDateFlexible(m[2]);
+      }
+      m = monthNameRange.exec(body);
+      if (m) {
+        console.info(LOG_PREFIX, 'findPeriodEndDate: matched month name range in body', m[0].slice(0,200));
+        return parseDateFlexible(m[2]);
+      }
+      // Same-origin frames: attempt the same heuristics inside each frame (handles Agresso iframe nesting)
+      try {
+        for (let fi = 0; fi < (window.frames && window.frames.length || 0); fi++) {
+          try {
+            const fr = window.frames[fi];
+            const fd = fr.document;
+            if (!fd) continue;
+            // Look for DivOverflowNoWrap-style date headers first
+            const candidates = Array.from(fd.querySelectorAll('.DivOverflowNoWrap, .Ellipsis, .Separator'));
+            const dateNodes = candidates.filter((n) => {
+              try {
+                const t = (n.textContent || '').trim();
+                const title = n.getAttribute && (n.getAttribute('title') || '');
+                const data = n.dataset && n.dataset.originaltext ? n.dataset.originaltext : '';
+                const inner = n.innerHTML || '';
+                return dateTokenRe.test(t) || dateTokenRe.test(title) || dateTokenRe.test(data) || dateTokenRe.test(inner);
+              } catch (e) { return false; }
+            });
+
+            if (dateNodes.length) {
+              try { console.info(LOG_PREFIX, 'findPeriodEndDate: frame dateNodes count', fi, dateNodes.length); } catch (e) {}
+              // Group by table
+              const tablesMap = new Map();
+              dateNodes.forEach((n) => {
+                try {
+                  const tbl = n.closest && n.closest('table');
+                  if (!tbl) return;
+                  if (!tablesMap.has(tbl)) tablesMap.set(tbl, []);
+                  tablesMap.get(tbl).push(n);
+                } catch (e) {}
+              });
+
+              // If no tables found from these nodes, try a broader search for nodes
+              if (tablesMap.size === 0) {
+                try {
+                  const extra = Array.from(fd.querySelectorAll('[data-originaltext], [title]'))
+                    .filter(el => {
+                      try {
+                        const v = (el.dataset && el.dataset.originaltext) || el.getAttribute('title') || el.innerHTML || '';
+                        return dateTokenRe.test(String(v));
+                      } catch (e) { return false; }
+                    });
+                  try { console.info(LOG_PREFIX, 'findPeriodEndDate: frame extra candidate count', fi, extra.length); } catch (e) {}
+                  extra.forEach((n) => {
+                    try {
+                      const tbl = n.closest && n.closest('table');
+                      if (!tbl) return;
+                      if (!tablesMap.has(tbl)) tablesMap.set(tbl, []);
+                      tablesMap.get(tbl).push(n);
+                    } catch (e) {}
+                  });
+                  // Spatial fallback: if still no tables mapped, try matching each date node
+                  // to any table in the frame by comparing the node's horizontal center
+                  // with header cell bounding rects.
+                  if (tablesMap.size === 0) {
+                    try {
+                      const allTables = Array.from(fd.querySelectorAll('table'));
+                      if (allTables.length) {
+                        for (const n of extra.length ? extra : nodes) {
+                          try {
+                            const srcRect = n.getBoundingClientRect ? n.getBoundingClientRect() : null;
+                            if (!srcRect) continue;
+                            const srcX = srcRect.left + (srcRect.width || 0) / 2;
+                            for (const t of allTables) {
+                              try {
+                                const hdr = t.querySelector('thead tr') || t.querySelector('tr');
+                                if (!hdr) continue;
+                                const hdrs = Array.from(hdr.querySelectorAll('th,td'));
+                                for (let i = 0; i < hdrs.length; i++) {
+                                  try {
+                                    const r = hdrs[i].getBoundingClientRect();
+                                    if (srcX >= (r.left - 2) && srcX <= (r.right + 2)) {
+                                      if (!tablesMap.has(t)) tablesMap.set(t, []);
+                                      tablesMap.get(t).push(n);
+                                      throw 'mapped';
+                                    }
+                                  } catch (e) {
+                                    if (e === 'mapped') break;
+                                  }
+                                }
+                                // if mapped, move to next node
+                                if (tablesMap.has(t) && tablesMap.get(t).indexOf(n) >= 0) break;
+                              } catch (e) {}
+                            }
+                          } catch (e) {}
+                        }
+                      }
+                    } catch (e) {}
+                  }
+                } catch (e) {}
+              }
+
+              for (const [tbl, nodes] of tablesMap.entries()) {
+                try {
+                  // New: try mapping date DIV nodes directly to their nearest th/td
+                  for (const n of nodes) {
+                    try {
+                      const headerCellDirect = n.closest && n.closest('th,td');
+                      if (headerCellDirect && headerCellDirect.cellIndex >= 0) {
+                        // prefer date token on the node (handles <div class="DivOverflowNoWrap" elements)
+                        let txtRaw = '';
+                        try { txtRaw = (n.getAttribute && (n.getAttribute('title') || '')) || n.dataset && n.dataset.originaltext || (n.textContent || n.innerHTML || ''); } catch (e) { txtRaw = (n.textContent||n.innerHTML||''); }
+                        txtRaw = String(txtRaw).replace(/<br\s*\/?>(\s*)/gi, ' ').trim();
+                        const m = dateTokenRe.exec(txtRaw);
+                        if (m) {
+                          let inferredYear = (new Date()).getFullYear();
+                          try {
+                            const explicit = Array.from(fd.querySelectorAll('input,span,div')).map(x => (x.value||x.textContent||'').trim()).find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
+                            if (explicit) {
+                              const d = parseDateFlexible(explicit);
+                              if (d) inferredYear = d.getFullYear();
+                            }
+                          } catch (e) {}
+                          const dt = new Date(inferredYear, Number(m[2]) - 1, Number(m[1]));
+                          console.info(LOG_PREFIX, 'findPeriodEndDate: mapped date-node to header cell in frame', { frame: fi, nodeText: txtRaw, columnIndex: headerCellDirect.cellIndex, date: dt });
+                          return dt;
+                        }
+                      }
+                    } catch (e) {}
+                  }
+                  // find header row/cells
+                  const headerRow = tbl.querySelector('thead tr') || tbl.querySelector('tr');
+                  const headers = headerRow ? Array.from(headerRow.querySelectorAll('th,td')) : [];
+                  const sumIdx = headers.findIndex(h => /\b(sum|summa|\u03a3)\b/i.test((h.textContent||'').trim()));
+                  const frGetStyle = (el) => { try { return fr.getComputedStyle ? fr.getComputedStyle(el).color : (el.style && el.style.color) || ''; } catch (e) { return ''; } };
+                  const isRedInFrame = (colorStr) => {
+                    return isRedColor(colorStr);
+                  };
+
+                  // Spatial mapping: find which header column horizontally matches a floating node
+                  const getColumnIndexByX = (tblNode, srcNode) => {
+                    try {
+                      const srcRect = srcNode.getBoundingClientRect();
+                      const srcX = srcRect.left + srcRect.width / 2;
+                      const hdrRow = tblNode.querySelector('thead tr') || tblNode.querySelector('tr');
+                      if (!hdrRow) return -1;
+                      const hdrs = Array.from(hdrRow.querySelectorAll('th,td'));
+                      for (let i = 0; i < hdrs.length; i++) {
+                        try {
+                          const r = hdrs[i].getBoundingClientRect();
+                          if (srcX >= (r.left - 2) && srcX <= (r.right + 2)) return i;
+                        } catch (e) { continue; }
+                      }
+                    } catch (e) {}
+                    return -1;
+                  };
+
+                  if (sumIdx > 0) {
+                    for (let ci = sumIdx - 1; ci >= 0; ci--) {
+                      try {
+                        const headerCell = headers[ci];
+                        const headerColor = headerCell && frGetStyle(headerCell);
+                        let colIsRed = isRedInFrame(headerColor);
+                        if (!colIsRed) {
+                          const rows = Array.from(tbl.querySelectorAll('tr'));
+                          let checked = 0;
+                          for (let r = 1; r < rows.length && checked < 6; r++) {
+                            const cell = rows[r].cells && rows[r].cells[ci];
+                            if (!cell) continue;
+                            const txt = (cell.textContent || '').trim();
+                            if (!txt) continue;
+                            checked++;
+                            const cellColor = frGetStyle(cell);
+                            if (isRedInFrame(cellColor)) { colIsRed = true; break; }
+                          }
+                        }
+                        if (!colIsRed) {
+                          // parse date from header cell (title, data-originaltext, innerHTML)
+                          let txt = '';
+                          try { txt = (headerCell && (headerCell.textContent || headerCell.getAttribute('title') || headerCell.dataset && headerCell.dataset.originaltext || headerCell.innerHTML)) || ''; txt = String(txt).replace(/<br\s*\/?>(\s*)/gi, ' ').trim(); } catch (e) { txt = (headerCell && headerCell.textContent) || ''; }
+                          const m = dateTokenRe.exec(txt);
+                          if (m) {
+                            let inferredYear = (new Date()).getFullYear();
+                            try {
+                              const explicit = Array.from(fd.querySelectorAll('input,span,div')).map(n => (n.value||n.textContent||'').trim()).find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
+                              if (explicit) {
+                                const d = parseDateFlexible(explicit);
+                                if (d) inferredYear = d.getFullYear();
+                              }
+                            } catch (e) {}
+                            const dt = new Date(inferredYear, Number(m[2]) - 1, Number(m[1]));
+                            console.info(LOG_PREFIX, 'findPeriodEndDate: detected end in frame by Sum-left', { frame: fi, headerText: txt, columnIndex: ci, date: dt });
+                            return dt;
+                          }
+                        }
+                      } catch (e) {}
+                    }
+                  }
+
+                  // fallback: examine date-like nodes in this table, choose rightmost non-red
+                  // Also attempt spatial mapping: map floating date nodes to columns by X coordinate
+                  for (const dn of nodes) {
+                    try {
+                      let raw = '';
+                      try { raw = (dn.getAttribute && (dn.getAttribute('title') || '')) || dn.dataset && dn.dataset.originaltext || (dn.textContent || dn.innerHTML || ''); } catch (e) { raw = (dn.textContent||dn.innerHTML||''); }
+                      raw = String(raw).replace(/<br\s*\/?>(\s*)/gi, ' ').trim();
+                      const m = dateTokenRe.exec(raw);
+                      if (!m) continue;
+                      let colIdx = -1;
+                      try {
+                        const maybeCell = dn.closest && dn.closest('th,td');
+                        if (maybeCell && typeof maybeCell.cellIndex === 'number') colIdx = maybeCell.cellIndex;
+                        if (colIdx < 0) colIdx = getColumnIndexByX(tbl, dn);
+                      } catch (e) { colIdx = getColumnIndexByX(tbl, dn); }
+                      if (colIdx >= 0) {
+                        let inferredYear = (new Date()).getFullYear();
+                        try {
+                          const explicit = Array.from(fd.querySelectorAll('input,span,div')).map(n => (n.value||n.textContent||'').trim()).find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
+                          if (explicit) {
+                            const d = parseDateFlexible(explicit);
+                            if (d) inferredYear = d.getFullYear();
+                          }
+                        } catch (e) {}
+                        const dt = new Date(inferredYear, Number(m[2]) - 1, Number(m[1]));
+                        console.info(LOG_PREFIX, 'findPeriodEndDate: mapped node->column by geometry in frame', { frame: fi, raw, columnIndex: colIdx, date: dt });
+                        return dt;
+                      }
+                    } catch (e) {}
+                  }
+                  const headerCells = headers.length ? headers : Array.from(tbl.querySelectorAll('th,td'));
+                  const hdrs = [];
+                  headerCells.forEach((h, idx) => {
+                    try {
+                      let txt = (h.textContent || h.getAttribute('title') || h.dataset && h.dataset.originaltext || h.innerHTML) || '';
+                      txt = String(txt).replace(/<br\s*\/?>(\s*)/gi, ' ').trim();
+                      if (dateTokenRe.test(txt)) hdrs.push({ el: h, idx, txt });
+                    } catch (e) {}
+                  });
+                  for (let i = hdrs.length - 1; i >= 0; i--) {
+                    const info = hdrs[i];
+                    const ci = info.idx;
+                    let colIsRed = false;
+                    try { colIsRed = isRedInFrame(frGetStyle(info.el)); } catch (e) {}
+                    if (!colIsRed) {
+                      try {
+                        const rows = Array.from(tbl.querySelectorAll('tr'));
+                        let checked = 0;
+                        for (let r = 1; r < rows.length && checked < 6; r++) {
+                          const cell = rows[r].cells && rows[r].cells[ci];
+                          if (!cell) continue;
+                          const txt = (cell.textContent || '').trim();
+                          if (!txt) continue;
+                          checked++;
+                          const cellColor = frGetStyle(cell);
+                          if (isRedInFrame(cellColor)) { colIsRed = true; break; }
+                        }
+                      } catch (e) {}
+                    }
+                    if (!colIsRed) {
+                      const m2 = dateTokenRe.exec(info.txt);
+                      if (m2) {
+                        let inferredYear = (new Date()).getFullYear();
+                        try {
+                          const explicit = Array.from(fd.querySelectorAll('input,span,div')).map(n => (n.value||n.textContent||'').trim()).find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
+                          if (explicit) {
+                            const d = parseDateFlexible(explicit);
+                            if (d) inferredYear = d.getFullYear();
+                          }
+                        } catch (e) {}
+                        const dt = new Date(inferredYear, Number(m2[2]) - 1, Number(m2[1]));
+                        console.info(LOG_PREFIX, 'findPeriodEndDate: detected end in frame by header fallback', { frame: fi, headerText: info.txt, columnIndex: ci, date: dt });
+                        return dt;
+                      }
+                    }
+                  }
+                } catch (e) {}
+              }
+            }
+          } catch (e) {
+            // cross-origin or access error - ignore
+          }
+        }
+      } catch (e) {}
+      // If not found in this document, try same-origin iframes (Agresso may render inside frames)
+      try {
+        for (let i = 0; i < (window.frames && window.frames.length || 0); i++) {
+          try {
+            const fr = window.frames[i];
+            const fd = fr.document;
+            if (!fd) continue;
+            const fbody = (fd.body && fd.body.innerText) || '';
+            let fm = dateRangeIso.exec(fbody);
+            if (fm) {
+              console.info(LOG_PREFIX, 'findPeriodEndDate: matched iso range in iframe body', fm[0].slice(0,200));
+              return parseDateFlexible(fm[2]);
+            }
+            fm = dateRangeSlashed.exec(fbody);
+            if (fm) {
+              console.info(LOG_PREFIX, 'findPeriodEndDate: matched slashed range in iframe body', fm[0].slice(0,200));
+              return parseDateFlexible(fm[2]);
+            }
+            fm = monthNameRange.exec(fbody);
+            if (fm) {
+              console.info(LOG_PREFIX, 'findPeriodEndDate: matched month name range in iframe body', fm[0].slice(0,200));
+              return parseDateFlexible(fm[2]);
+            }
+          } catch (e) {
+            // cross-origin or other access errors - ignore
+          }
+        }
+      } catch (e) {}
+
+      // Extra heuristics: look for labelled 'Datum' inputs or nearby tokens
+      try {
+        const datumNode = Array.from(document.querySelectorAll('label,div,span,th,td')).find(n => /Datum i perioden|Datum i period|Datum i perioden|Datum i perioder|Datum/i.test(n.textContent || ''));
+        if (datumNode) {
+          // try to locate an input within the same row or nearby
+          const input = datumNode.closest('tr')?.querySelector('input') || datumNode.querySelector('input') || datumNode.nextElementSibling?.querySelector('input') || document.querySelector('input[name*="datum"], input[id*="datum"], input[name*="date"], input[id*="date"], input[type="date"]');
+          const val = input && (input.value || input.getAttribute('value') || '').trim();
+          if (val) {
+            const pd = parseDateFlexible(val);
+            if (pd) {
+              console.info(LOG_PREFIX, 'findPeriodEndDate: parsed date from datum input', val, pd);
+              return pd;
+            }
+          }
+          const nearbyText = (datumNode.textContent || '') + ' ' + (datumNode.nextElementSibling && datumNode.nextElementSibling.textContent || '');
+          const tokenMatch = /(\d{1,2}[\/\.]\\\d{1,2}(?:[\/\.]\d{2,4})?)/.exec(nearbyText) || /(\d{1,2}\s+[A-Za-zåäöÅÄÖ]{3,}\s*\d{0,4})/.exec(nearbyText);
+          if (tokenMatch) {
+            const pd = parseDateFlexible(tokenMatch[1]);
+            if (pd) {
+              console.info(LOG_PREFIX, 'findPeriodEndDate: parsed date from nearby datum text', tokenMatch[1], pd);
+              return pd;
+            }
+          }
+        }
+      } catch (e) {}
+    } catch (e) {
+      // ignore
+    }
+    return null;
+  }
+
+  function buildDebugReport() {
+    try {
+      const heading = Array.from(document.querySelectorAll('h1,h2,h3,legend,div,span,th'))
+        .find(el => /Arbetstimmar|Daglig tidregistrering|Tidrapport/i.test(el.textContent||''));
+      const tbl = heading ? (heading.closest('section') || heading.closest('fieldset') || heading.closest('table') || document.body).querySelector('table') : null;
+      const headerRow = tbl ? (tbl.querySelector('tr') || tbl.querySelector('thead tr')) : null;
+      const cells = headerRow ? Array.from(headerRow.querySelectorAll('th,td')) : [];
+      const headerCells = cells.map(c => ({ text: (c.innerText||'').trim(), html: (c.innerHTML||'').trim(), outer: (c.outerHTML||'').slice(0,500), attrs: Array.from(c.attributes||[]).map(a=>({name:a.name,value:a.value})) }));
+
+      const attrMatches = [];
+      if (tbl) {
+        tbl.querySelectorAll('*').forEach(el=>{
+          Array.from(el.attributes||[]).forEach(a=>{
+            if (/\d{1,2}[\/\.]\d{1,2}/.test(a.value)) {
+              attrMatches.push({ tag: el.tagName, attr: a.name, value: a.value, outer: (el.outerHTML||'').slice(0,300) });
+            }
+          });
+        });
+      }
+
+      const textMatches = [];
+      if (tbl) {
+        tbl.querySelectorAll('*').forEach(el=>{
+          const t = (el.textContent||'').trim();
+          if (/\b\d{1,2}[\/\.]\d{1,2}\b/.test(t)) textMatches.push({ tag: el.tagName, text: t.slice(0,200), outer: (el.outerHTML||'').slice(0,200) });
+        });
+      }
+
+      const datumInput = (() => {
+        const node = Array.from(document.querySelectorAll('label,div,span,th,td')).find(n => /Datum i perioden/i.test(n.textContent || ''));
+        if (!node) return null;
+        const input = node.closest('tr')?.querySelector('input') || node.querySelector('input') || node.nextElementSibling?.querySelector('input') || document.querySelector('input[type="text"], input[type="date"]');
+        return input ? { value: input.value || input.getAttribute('value') || null, outer: input.outerHTML } : null;
+      })();
+
+      return { heading: heading ? (heading.textContent||'').trim() : null, tableFound: !!tbl, headerCells, attrMatches: attrMatches.slice(0,50), textMatches: textMatches.slice(0,50), datumInput };
+    } catch (e) {
+      return { error: String(e) };
+    }
+  }
+
+  function isSameDay(a, b) {
+    return a && b && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  }
+
+  function localIsoDate(d) {
+    try {
+      if (!d || !d.getFullYear) return null;
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const da = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${da}`;
+    } catch (e) { return null; }
+  }
+
+  function showPeriodNotification(endDate) {
+    const today = new Date();
+    // Respect user preference for reminder
+    try {
+      const enabled = (function() { try { const v = localStorage.getItem(REMINDER_ENABLED_KEY); return v === null ? true : v === '1' || v === 'true'; } catch (e) { return true; } })();
+      console.info(LOG_PREFIX, 'showPeriodNotification: reminder enabled?', enabled);
+      if (!enabled) return;
+    } catch (e) {}
+
+    const lastNotified = (() => {
+      try {
+        try {
+          if (window.top && window.top.localStorage) return window.top.localStorage.getItem(PERIOD_NOTIFY_KEY);
+        } catch (e) {}
+        return localStorage.getItem(PERIOD_NOTIFY_KEY);
+      } catch (e) { try { return localStorage.getItem(PERIOD_NOTIFY_KEY); } catch (e2) { return null; } }
+    })();
+    const endIso = localIsoDate(endDate) || endDate.toISOString().slice(0,10);
+    console.info(LOG_PREFIX, 'showPeriodNotification: endIso', endIso, 'lastNotified', lastNotified);
+    if (lastNotified === endIso) {
+      // Already stored as notified — ensure the visual indicator is applied
+      try { console.info(LOG_PREFIX, 'showPeriodNotification: already notified, enforcing UI highlight'); } catch (e) {}
+      try { /* force UI-only highlight without updating storage */ notifyNow(true); } catch (e) {}
+      try {
+        // Ask the top-level frame to enforce the highlight as well (works via postMessage
+        // even across origins; the top frame's content-script will listen and apply).
+        if (window.top && window.top !== window) {
+          try { window.top.postMessage({ type: 'agresso_period_enforce', endIso: endIso }, '*'); } catch (e) {}
+        }
+      } catch (e) {}
+      return;
+    }
+    // Instead of using browser notifications (which may be blocked), highlight the
+    // autosave timer bar in red and display a clear reminder in the indicator.
+    const notifyNow = (forceUIOnly) => {
+      const lang = (function() { try { return localStorage.getItem(REMINDER_LANG_KEY) || 'sv'; } catch (e) { return 'sv'; } })();
+      const title = lang === 'en' ? 'Time report reminder' : 'Tidrapport påminnelse';
+      const body = lang === 'en' ? 'Today is the last day of the period — submit your time report.' : 'Idag är sista dagen för perioden – skicka in din tidrapport.';
+
+        try {
+          // Update the indicator label/subtext and add an explicit explanation
+          try {
+            const explanation = lang === 'en' ? 'Red = today is the last day — submit your time report.' : 'Röd = idag är sista dagen — skicka in din tidrapport.';
+            try { setIndicator('pending', title, `${body} • ${explanation}`); } catch (e) {}
+          } catch (e) {}
+
+          // Ensure the timer bar exists and set it to a red color to indicate urgency.
+          // Also set the animation duration to match the current autosave timer remaining time.
+          try {
+            const bar = ensureTimerBar();
+            bar.style.backgroundColor = '#d9534f';
+            bar.style.boxShadow = '0 0 6px rgba(217,83,79,0.6)';
+            try {
+              // Use the same width-based timer as normal mode so behavior matches
+              resetTimerBar(getTimerRemainingMs());
+            } catch (e) {}
+          } catch (e) {}
+
+          // Add a persistent visual marker on the indicator element
+          try {
+            const indicator = ensureIndicator();
+            indicator.classList.add('agresso-period-end');
+            // Apply inline styles to ensure visual highlight even if CSS didn't load
+            try {
+              indicator.style.border = '2px solid rgba(217,83,79,0.9)';
+              indicator.style.background = 'linear-gradient(180deg, rgba(36,41,50,0.95), rgba(30,25,28,0.95))';
+              const labelEl = indicator.querySelector('.agresso-autosave-label'); if (labelEl) labelEl.style.color = '#fff';
+              const subEl = indicator.querySelector('.agresso-autosave-sub'); if (subEl) subEl.style.color = '#ffecec';
+            } catch (e) {}
+            try { highlightStatusField(true); } catch (e) {}
+            // If previously acknowledged for this period, mark acknowledged
+            try {
+              const ack = getPeriodAckDate();
+              if (ack === endIso) {
+                indicator.classList.add('agresso-acknowledged');
+              } else {
+                indicator.classList.remove('agresso-acknowledged');
+              }
+            } catch (e) {}
+            try { updateAckButtonState(); } catch (e) {}
+          } catch (e) {}
+
+            // Also attempt to update the top-level document's indicator so the
+            // visual highlight is visible when this script runs inside a frame.
+            try {
+              if (window.top && window.top.document) {
+                try {
+                  const topDoc = window.top.document;
+                  const topInd = topDoc.getElementById(INDICATOR_ID);
+                  if (topInd) {
+                    topInd.classList.add('agresso-period-end');
+                    try { topInd.classList.remove('agresso-saving'); } catch (e) {}
+                    try { topInd.classList.remove('agresso-saved'); } catch (e) {}
+                    try { topInd.classList.add('agresso-pending'); } catch (e) {}
+                    try {
+                      const lbl = topInd.querySelector('.agresso-autosave-label');
+                      if (lbl) lbl.textContent = title;
+                      const subEl = topInd.querySelector('.agresso-autosave-sub');
+                      if (subEl) subEl.textContent = body;
+                    } catch (e) {}
+                    try {
+                      const bar = topInd.querySelector('.agresso-autosave-timer');
+                      if (bar) {
+                        try { bar.classList.add('agresso-period-moving'); try { resetTimerBar(getTimerRemainingMs()); } catch (e2) {} } catch (e) {}
+                        bar.style.backgroundColor = '#d9534f';
+                        bar.style.boxShadow = '0 0 6px rgba(217,83,79,0.6)';
+                      }
+                    } catch (e) {}
+                    try {
+                      topInd.style.border = '2px solid rgba(217,83,79,0.9)';
+                      topInd.style.background = 'linear-gradient(180deg, rgba(36,41,50,0.95), rgba(30,25,28,0.95))';
+                    } catch (e) {}
+                    try {
+                      const ack = (window.top && window.top.localStorage) ? window.top.localStorage.getItem(PERIOD_ACK_KEY) : null;
+                      if (ack === endIso) topInd.classList.add('agresso-acknowledged'); else topInd.classList.remove('agresso-acknowledged');
+                    } catch (e) {}
+                  }
+                } catch (e) {}
+              }
+            } catch (e) {}
+
+          // Immediately refresh subtext with current Status and start periodic refresh
+          try { refreshPeriodIndicatorStatus(); } catch (e) {}
+          try {
+            if (periodStatusRefreshTimer) clearInterval(periodStatusRefreshTimer);
+            periodStatusRefreshTimer = window.setInterval(refreshPeriodIndicatorStatus, 2000);
+          } catch (e) {}
+          // No native system notification — keep visual indicator coloring only.
+        } catch (e) {
+          // ignore
+        }
+        try {
+          // Inject a forcing CSS override into both current and top documents
+              const injectStyle = (doc) => {
+            try {
+              if (!doc) return;
+              const existing = doc.getElementById('agresso-period-end-style');
+              if (existing) return;
+              const s = doc.createElement('style');
+              s.id = 'agresso-period-end-style';
+                  s.textContent = `#${INDICATOR_ID} { border: 2px solid rgba(217,83,79,0.9) !important; background: linear-gradient(180deg, rgba(36,41,50,0.95), rgba(30,25,28,0.95)) !important; }
+                #${INDICATOR_ID} .agresso-autosave-timer { height: 6px !important; display: block !important; background-color: #d9534f !important; box-shadow: 0 0 6px rgba(217,83,79,0.6) !important; transform-origin: left !important; }
+                #${INDICATOR_ID} .agresso-autosave-label, #${INDICATOR_ID} .agresso-autosave-sub { color: #fff !important; }
+                /* No CSS animation here; progress is driven via inline width transition from JS */
+                #${INDICATOR_ID} .agresso-autosave-timer.agresso-period-moving { /* uses JS width transition */ }
+              `;
+              (doc.head || doc.body || doc.documentElement).appendChild(s);
+            } catch (e) {}
+          };
+
+          try { injectStyle(document); } catch (e) {}
+          try { if (window.top && window.top.document && window.top !== window) injectStyle(window.top.document); } catch (e) {}
+
+          // Enforce visual highlight on both current and top documents. Do this
+          // immediately and at a few short delays to beat any UI updates that
+          // would otherwise remove the styling/classes.
+          const enforceHighlight = (doc) => {
+            try {
+              if (!doc) return;
+              const ind = doc.getElementById && doc.getElementById(INDICATOR_ID);
+              if (!ind) return;
+              try { ind.classList.add('agresso-period-end'); } catch (e) {}
+              try { ind.classList.remove('agresso-saving'); } catch (e) {}
+              try { ind.classList.remove('agresso-saved'); } catch (e) {}
+              try { ind.classList.add('agresso-pending'); } catch (e) {}
+              try { ind.style.border = '2px solid rgba(217,83,79,0.9)'; } catch (e) {}
+              try { ind.style.background = 'linear-gradient(180deg, rgba(36,41,50,0.95), rgba(30,25,28,0.95))'; } catch (e) {}
+                  try {
+                const bar = ind.querySelector && ind.querySelector('.agresso-autosave-timer');
+                if (bar) {
+                  try { bar.classList.add('agresso-period-moving'); try { resetTimerBar(getTimerRemainingMs()); } catch (e2) {} } catch (e) {}
+                  try { bar.style.backgroundColor = '#d9534f'; } catch (e) {}
+                  try { bar.style.boxShadow = '0 0 6px rgba(217,83,79,0.6)'; } catch (e) {}
+                }
+              } catch (e) {}
+            } catch (e) {}
+          };
+
+          try { enforceHighlight(document); } catch (e) {}
+          try { if (window.top && window.top.document && window.top !== window) enforceHighlight(window.top.document); } catch (e) {}
+          [100, 500, 1500, 3000].forEach((ms) => {
+            try { window.setTimeout(() => { try { enforceHighlight(document); } catch (e) {} try { if (window.top && window.top.document && window.top !== window) enforceHighlight(window.top.document); } catch (e) {} }, ms); } catch (e) {}
+          });
+
+          // Start a persistent enforcer that reapplies highlight until the
+          // stored notify key changes or the user acknowledges the period.
+          try {
+            // Helper to show a small persistent banner prompting submission
+            const createSubmitBanner = (doc, titleText, bodyText) => {
+              try {
+                if (!doc || !doc.body) return;
+                if (doc.getElementById('agresso-period-banner')) return;
+                const ban = doc.createElement('div');
+                ban.id = 'agresso-period-banner';
+                ban.style.position = 'fixed';
+                ban.style.right = '16px';
+                ban.style.bottom = '20px';
+                ban.style.zIndex = '9999999';
+                ban.style.padding = '18px 20px';
+                ban.style.background = 'linear-gradient(180deg, rgba(217,83,79,0.95), rgba(181,62,62,0.95))';
+                ban.style.color = '#fff';
+                ban.style.borderRadius = '10px';
+                ban.style.boxShadow = '0 6px 18px rgba(0,0,0,0.35)';
+                ban.style.fontSize = '15px';
+                ban.style.display = 'flex';
+                ban.style.flexDirection = 'column';
+                ban.style.alignItems = 'flex-start';
+                ban.style.gap = '10px';
+                ban.style.maxWidth = '420px';
+                // Explanation line on top (bold)
+                const expl = doc.createElement('div');
+                expl.style.fontWeight = '700';
+                expl.style.fontSize = '15px';
+                expl.textContent = titleText || 'SISTA DAGEN I PERIODEN';
+                // Regular message below
+                const txt = doc.createElement('div');
+                txt.style.maxWidth = '360px';
+                txt.style.fontSize = '13px';
+                txt.textContent = bodyText || 'Submit your time report today.';
+                const controls = doc.createElement('div');
+                controls.style.display = 'flex';
+                controls.style.gap = '8px';
+                // Primary action
+                const btn = doc.createElement('button');
+                btn.textContent = (titleText || 'Open report');
+                btn.style.background = '#fff';
+                btn.style.color = '#b02a2a';
+                btn.style.border = 'none';
+                btn.style.padding = '8px 10px';
+                btn.style.borderRadius = '6px';
+                btn.style.cursor = 'pointer';
+                btn.addEventListener('click', (ev) => {
+                  ev.stopPropagation(); ev.preventDefault();
+                  try {
+                    const sb = findSaveButton();
+                    if (sb) {
+                      try { sb.scrollIntoView({ behavior: 'smooth' }); } catch (e) {}
+                      try { sb.focus(); } catch (e) {}
+                    }
+                  } catch (e) {}
+                }, true);
+                // Dismiss action (ack)
+                const ackBtn = doc.createElement('button');
+                ackBtn.textContent = '✓ Acknowledge';
+                ackBtn.style.background = 'transparent';
+                ackBtn.style.color = '#fff';
+                ackBtn.style.border = '1px solid rgba(255,255,255,0.2)';
+                ackBtn.style.padding = '6px 8px';
+                ackBtn.style.borderRadius = '6px';
+                ackBtn.style.cursor = 'pointer';
+                ackBtn.addEventListener('click', (ev) => {
+                  ev.stopPropagation(); ev.preventDefault();
+                  try { const last = (() => { try { return localStorage.getItem(PERIOD_NOTIFY_KEY); } catch (e) { return null; } })() || (new Date()).toISOString().slice(0,10); setPeriodAckDate(last); } catch (e) {}
+                  try { const ex = doc.getElementById('agresso-period-banner'); if (ex && ex.parentNode) ex.parentNode.removeChild(ex); } catch (e) {}
+                }, true);
+                controls.appendChild(btn);
+                controls.appendChild(ackBtn);
+                ban.appendChild(expl);
+                ban.appendChild(txt);
+                ban.appendChild(controls);
+                (doc.body || doc.documentElement).appendChild(ban);
+              } catch (e) {}
+            };
+
+            const removeSubmitBanner = (doc) => {
+              try {
+                if (!doc) return;
+                const ex = doc.getElementById('agresso-period-banner');
+                if (ex && ex.parentNode) ex.parentNode.removeChild(ex);
+              } catch (e) {}
+            };
+
+            // Diagnostic: compare timer bar behavior in normal vs highlighted mode.
+            const compareTimerModes = () => {
+              return new Promise((resolve) => {
+                try {
+                  const doc = document;
+                  const bar = doc.querySelector('.agresso-autosave-timer');
+                  if (!bar) return resolve({ error: 'no-timer-bar' });
+
+                  const sample = () => {
+                    const cs = window.getComputedStyle(bar);
+                    return {
+                      classList: Array.from(bar.classList),
+                      animationName: cs.animationName,
+                      animationDuration: cs.animationDuration,
+                      transform: cs.transform,
+                      width: cs.width,
+                      inlineWidth: bar.style.width || null,
+                      inlineTransform: bar.style.transform || null,
+                      inlineTransition: bar.style.transition || null
+                    };
+                  };
+
+                  // baseline
+                  const baseline = sample();
+                  const hadMoving = bar.classList.contains('agresso-period-moving');
+                  const hadMarker = (bar.closest('.agresso-period-end') != null) || (document.querySelector('.agresso-period-end') != null);
+
+                  // apply highlighted mode
+                  bar.classList.add('agresso-period-moving');
+                  // also ensure parent indicator has period-end marker
+                  const parentIndicator = bar.closest('.agresso-enabled, .agresso-disabled, .agresso-indicator') || document.body;
+                  parentIndicator.classList.add('agresso-period-end');
+
+                  // allow styles to settle
+                  setTimeout(() => {
+                    const highlighted = sample();
+                    // revert to previous state
+                    if (!hadMoving) bar.classList.remove('agresso-period-moving');
+                    if (!hadMarker) parentIndicator.classList.remove('agresso-period-end');
+                    resolve({ baseline, highlighted });
+                  }, 110);
+                } catch (e) { resolve({ error: String(e) }); }
+              });
+            };
+            try { if (periodHighlightEnforcer) { clearInterval(periodHighlightEnforcer); periodHighlightEnforcer = null; } } catch (e) {}
+            periodHighlightEnforcer = window.setInterval(() => {
+              try { enforceHighlight(document); } catch (e) {}
+              try { if (window.top && window.top.document && window.top !== window) enforceHighlight(window.top.document); } catch (e) {}
+              // Stop if notify key no longer matches or ack equals endIso
+              let topNotify = null; try { topNotify = (window.top && window.top.localStorage) ? window.top.localStorage.getItem(PERIOD_NOTIFY_KEY) : null; } catch (e) { topNotify = null; }
+              let localNotify = null; try { localNotify = localStorage.getItem(PERIOD_NOTIFY_KEY); } catch (e) { localNotify = null; }
+              let ack = null; try { ack = (window.top && window.top.localStorage) ? window.top.localStorage.getItem(PERIOD_ACK_KEY) : localStorage.getItem(PERIOD_ACK_KEY); } catch (e) { ack = null; }
+              if ((topNotify !== endIso && localNotify !== endIso) || ack === endIso) {
+                try { clearInterval(periodHighlightEnforcer); periodHighlightEnforcer = null; } catch (e) {}
+                try { removeSubmitBanner(document); } catch (e) {}
+                try { if (window.top && window.top.document && window.top !== window) removeSubmitBanner(window.top.document); } catch (e) {}
+              }
+            }, 1000);
+          } catch (e) {}
+
+          if (!forceUIOnly) {
+            try {
+              if (window.top && window.top.localStorage) {
+                window.top.localStorage.setItem(PERIOD_NOTIFY_KEY, endIso);
+              } else {
+                localStorage.setItem(PERIOD_NOTIFY_KEY, endIso);
+              }
+            } catch (e) {
+              try { localStorage.setItem(PERIOD_NOTIFY_KEY, endIso); } catch (e2) {}
+            }
+            // Create a persistent banner prompting submission (current + top)
+            try { createSubmitBanner(document, explanation, `${title} — ${body}`); } catch (e) {}
+            try { if (window.top && window.top.document && window.top !== window) createSubmitBanner(window.top.document, explanation, `${title} — ${body}`); } catch (e) {}
+            console.info(LOG_PREFIX, 'showPeriodNotification: stored PERIOD_NOTIFY_KEY', endIso);
+          } else {
+            try { console.info(LOG_PREFIX, 'showPeriodNotification: UI-only enforcement, not storing key'); } catch (e) {}
+          }
+          // Always attempt to create the persistent submit banner so users
+          // get a visible prompt even when we only enforce UI (already-notified path).
+          try { createSubmitBanner(document, explanation, `${title} — ${body}`); } catch (e) {}
+          try { if (window.top && window.top.document && window.top !== window) createSubmitBanner(window.top.document, explanation, `${title} — ${body}`); } catch (e) {}
+        } catch (e) {}
+      };
+
+    // Fire after a short timeout so init tasks finish first
+    window.setTimeout(notifyNow, 200);
+  }
+
+  function checkPeriodAndNotify(context) {
+    try {
+      // Respect manual override first
+      const override = getOverrideDate();
+      if (override) {
+        console.info(LOG_PREFIX, 'checkPeriodAndNotify: using override', override);
+        if (isSameDay(override, new Date())) { showPeriodNotification(override); console.info(LOG_PREFIX, 'checkPeriodAndNotify: override matched today'); return true; }
+        console.info(LOG_PREFIX, 'checkPeriodAndNotify: override not today');
+        return false;
+      }
+      const end = findPeriodEndDate();
+      if (!end) {
+        console.info(LOG_PREFIX, 'checkPeriodAndNotify: no end date found');
+        return false;
+      }
+      const today = new Date();
+      console.info(LOG_PREFIX, 'checkPeriodAndNotify: found end date', localIsoDate(end) || end.toISOString().slice(0,10), 'today', localIsoDate(today) || today.toISOString().slice(0,10));
+      if (isSameDay(end, today)) {
+        showPeriodNotification(end);
+        // Unless the report is confirmed 'Klar', force the GUI timer bar to red
+        try {
+          if (!isReportStatusKlar()) {
+            const applyRedUI = (doc) => {
+              try {
+                const d = doc || document;
+                const ind = d.getElementById && d.getElementById(INDICATOR_ID);
+                if (ind) {
+                  try { ind.classList.add('agresso-period-end'); } catch (e) {}
+                  try { ind.classList.remove('agresso-saving'); } catch (e) {}
+                  try { ind.classList.remove('agresso-saved'); } catch (e) {}
+                  try { ind.classList.add('agresso-pending'); } catch (e) {}
+                  try { ind.style.border = '2px solid rgba(217,83,79,0.9)'; } catch (e) {}
+                  try { ind.style.background = 'linear-gradient(180deg, rgba(36,41,50,0.95), rgba(30,25,28,0.95))'; } catch (e) {}
+                  try {
+                    const bar = ind.querySelector && ind.querySelector('.agresso-autosave-timer');
+                    if (bar) {
+                      try { bar.classList.add('agresso-period-moving'); try { resetTimerBar(getTimerRemainingMs()); } catch (e2) {} } catch (e) {}
+                      bar.style.backgroundColor = '#d9534f';
+                      bar.style.boxShadow = '0 0 6px rgba(217,83,79,0.6)';
+                    }
+                  } catch (e) {}
+                }
+                try {
+                    const existing = (d.getElementById && d.getElementById('agresso-period-end-style')) || null;
+                  if (!existing) {
+                    const s = d.createElement('style');
+                    s.id = 'agresso-period-end-style';
+                    s.textContent = `#${INDICATOR_ID} { border: 2px solid rgba(217,83,79,0.9) !important; background: linear-gradient(180deg, rgba(36,41,50,0.95), rgba(30,25,28,0.95)) !important; } #${INDICATOR_ID} .agresso-autosave-timer { height: 6px !important; display: block !important; background-color: #d9534f !important; box-shadow: 0 0 6px rgba(217,83,79,0.6) !important; transform-origin: left !important; } #${INDICATOR_ID} .agresso-autosave-label, #${INDICATOR_ID} .agresso-autosave-sub { color: #fff !important; } /* No CSS animation; JS width transition controls progress */ #${INDICATOR_ID} .agresso-autosave-timer.agresso-period-moving { }
+`;
+                    (d.head || d.body || d.documentElement).appendChild(s);
+                  }
+                } catch (e) {}
+              } catch (e) {}
+            };
+            try { applyRedUI(document); } catch (e) {}
+            try { if (window.top && window.top.document && window.top !== window) applyRedUI(window.top.document); } catch (e) {}
+          }
+        } catch (e) {}
+
+        console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is today, notified');
+        return true;
+      }
+      console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is not today');
+    } catch (e) {
+      // ignore
+    }
+    return false;
+  }
+  // Page-context helper injection removed due to site Content Security Policy (CSP).
+  // Use the content-script debug button or dispatch the DOM event `agresso_check_period`
+  // (e.g. `document.dispatchEvent(new Event('agresso_check_period'))`) to trigger checks safely.
+
   function onFieldInput(event) {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
@@ -1213,6 +2987,8 @@
       }
       refreshNoChangesBannerState('mutation');
       scheduleLayoutRefresh();
+        // Check whether today is the last day in the currently shown period and notify once
+        try { checkPeriodAndNotify('mutation'); } catch (e) { /* ignore */ }
       bindIndicatorTracking();
       bindActivityListeners();
     });
@@ -1250,6 +3026,8 @@
 
     // Top-level frame: full behavior
     setIndicator('saved', 'Autosave ready', 'Watching for edits');
+    // Check whether today is the last day in the currently shown period and notify once
+    try { checkPeriodAndNotify('init'); } catch (e) { /* ignore */ }
     
 
     // Attach field event listeners
@@ -1290,6 +3068,26 @@
     init();
   }
 
+  // Allow page to request a manual check by dispatching a DOM event (works despite CSP)
+  try {
+    document.addEventListener('agresso_check_period', (ev) => {
+      try {
+        const res = checkPeriodAndNotify('page-event');
+        console.info(LOG_PREFIX, 'agresso_check_period handler result', res);
+        try {
+          const indicator = ensureIndicator();
+          if (indicator) {
+            indicator.dataset.lastPeriodCheck = JSON.stringify({ result: !!res, ts: new Date().toISOString() });
+          }
+        } catch (e) {}
+      } catch (e) {
+        // ignore
+      }
+    }, false);
+  } catch (e) {
+    // ignore
+  }
+
   // Listen for activity messages from child frames and treat them as activity
   try {
     if (window.top === window) {
@@ -1298,6 +3096,75 @@
           if (ev && ev.data && ev.data.type === ACTIVITY_MESSAGE) {
             // Mark activity in the top frame
             markActivity();
+              return;
+            }
+            // Handle requests from child frames to enforce a period highlight
+            if (ev && ev.data && ev.data.type === 'agresso_period_enforce') {
+              try {
+                const endIso = ev.data && ev.data.endIso;
+                // Apply enforcement locally in the top frame
+                try {
+                  const indicator = ensureIndicator();
+                  if (indicator) {
+                    indicator.classList.add('agresso-period-end');
+                    try { indicator.classList.remove('agresso-saving'); } catch (e) {}
+                    try { indicator.classList.remove('agresso-saved'); } catch (e) {}
+                    try { indicator.classList.add('agresso-pending'); } catch (e) {}
+                    try { indicator.style.border = '2px solid rgba(217,83,79,0.9)'; } catch (e) {}
+                    try { indicator.style.background = 'linear-gradient(180deg, rgba(36,41,50,0.95), rgba(30,25,28,0.95))'; } catch (e) {}
+                    try {
+                      const bar = indicator.querySelector('.agresso-autosave-timer');
+                      if (bar) {
+                        try { bar.classList.add('agresso-period-moving'); try { resetTimerBar(getTimerRemainingMs()); } catch (e2) {} } catch (e) {}
+                        bar.style.backgroundColor = '#d9534f';
+                        bar.style.boxShadow = '0 0 6px rgba(217,83,79,0.6)';
+                      }
+                    } catch (e) {}
+                  }
+                } catch (e) {}
+
+                // Inject forcing style into top doc if missing
+                try {
+                  const doc = document;
+                  const existing = doc.getElementById('agresso-period-end-style');
+                  if (!existing) {
+                    const s = doc.createElement('style');
+                    s.id = 'agresso-period-end-style';
+                    s.textContent = `#${INDICATOR_ID} { border: 2px solid rgba(217,83,79,0.9) !important; background: linear-gradient(180deg, rgba(36,41,50,0.95), rgba(30,25,28,0.95)) !important; } #${INDICATOR_ID} .agresso-autosave-timer { height: 6px !important; display: block !important; background-color: #d9534f !important; box-shadow: 0 0 6px rgba(217,83,79,0.6) !important; transform-origin: left !important; } #${INDICATOR_ID} .agresso-autosave-label, #${INDICATOR_ID} .agresso-autosave-sub { color: #fff !important; } /* No CSS animation; JS width transition controls progress */ #${INDICATOR_ID} .agresso-autosave-timer.agresso-period-moving { }
+`;
+                    (doc.head || doc.body || doc.documentElement).appendChild(s);
+                  }
+                } catch (e) {}
+
+                // Start a persistent enforcer in top if not already running
+                try {
+                  if (periodHighlightEnforcer) { clearInterval(periodHighlightEnforcer); periodHighlightEnforcer = null; }
+                  periodHighlightEnforcer = window.setInterval(() => {
+                    try {
+                      const ind2 = ensureIndicator();
+                      if (ind2) {
+                        ind2.classList.add('agresso-period-end');
+                        ind2.classList.remove('agresso-saving');
+                        ind2.classList.remove('agresso-saved');
+                        ind2.classList.add('agresso-pending');
+                        try { ind2.style.border = '2px solid rgba(217,83,79,0.9)'; } catch (e) {}
+                        try { ind2.style.background = 'linear-gradient(180deg, rgba(36,41,50,0.95), rgba(30,25,28,0.95))'; } catch (e) {}
+                        try { const bar = ind2.querySelector('.agresso-autosave-timer'); if (bar) { try { bar.classList.add('agresso-period-moving'); try { resetTimerBar(getTimerRemainingMs()); } catch (e2) {} } catch (e) {} bar.style.backgroundColor = '#d9534f'; bar.style.boxShadow = '0 0 6px rgba(217,83,79,0.6)'; } } catch (e) {}
+                      }
+                    } catch (e) {}
+                    // Stop if notify key changed or ack set
+                    try {
+                      const topN = (window.top && window.top.localStorage) ? window.top.localStorage.getItem(PERIOD_NOTIFY_KEY) : null;
+                      const locN = localStorage.getItem(PERIOD_NOTIFY_KEY);
+                      const ack = (window.top && window.top.localStorage) ? window.top.localStorage.getItem(PERIOD_ACK_KEY) : localStorage.getItem(PERIOD_ACK_KEY);
+                      if ((topN !== endIso && locN !== endIso) || ack === endIso) {
+                        try { clearInterval(periodHighlightEnforcer); periodHighlightEnforcer = null; } catch (e) {}
+                      }
+                    } catch (e) {}
+                  }, 1000);
+                } catch (e) {}
+              } catch (e) {}
+              return;
           }
         } catch (e) {
           // ignore malformed messages
@@ -1307,4 +3174,14 @@
   } catch (e) {
     // ignore cross-origin
   }
+  try {
+    try { window.agresso_buildDebugReport = buildDebugReport; } catch (e) {}
+    try { window.agresso_compareTimerModes = compareTimerModes; } catch (e) {}
+    try {
+      window.agresso_setIndicatorDebug = function(enabled) {
+        try { INDICATOR_DEBUG = !!enabled; } catch (e) {}
+        try { console.info(LOG_PREFIX, 'agresso_setIndicatorDebug =>', INDICATOR_DEBUG); } catch (e) {}
+      };
+    } catch (e) {}
+  } catch (e) {}
 })();
