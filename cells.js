@@ -361,8 +361,6 @@
 
     // Debug button to log detection report to console (avoids CSP issues)
     let debugBtn = null;
-    // Acknowledge button (marks reminder acknowledged without clearing)
-    let ackBtn = null;
     if (INDICATOR_DEBUG) {
       try {
         debugBtn = indicatorDoc.createElement('button');
@@ -391,38 +389,7 @@
       }
     }
 
-    try {
-      ackBtn = indicatorDoc.createElement('button');
-      ackBtn.className = 'agresso-ack-btn';
-      ackBtn.setAttribute('type', 'button');
-      ackBtn.style.marginLeft = '6px';
-      ackBtn.style.fontSize = '12px';
-      ackBtn.style.lineHeight = '1';
-      ackBtn.style.padding = '2px 6px';
-      ackBtn.style.borderRadius = '4px';
-      ackBtn.style.border = 'none';
-      ackBtn.style.background = 'transparent';
-      ackBtn.textContent = '✓';
-      ackBtn.title = 'Acknowledge reminder (click to mark)';
-      ackBtn.addEventListener('click', (ev) => {
-        ev.stopPropagation(); ev.preventDefault();
-        try {
-          const last = (() => { try { return localStorage.getItem(PERIOD_NOTIFY_KEY); } catch (e) { return null; } })() || (new Date()).toISOString().slice(0,10);
-          const curAck = getPeriodAckDate();
-          if (curAck === last) {
-            clearPeriodAckDate();
-          } else {
-            setPeriodAckDate(last);
-          }
-          updateAckButtonState(ackBtn);
-          // Update indicator class
-          try {
-            const indicator = ensureIndicator();
-            if (getPeriodAckDate() === last) indicator.classList.add('agresso-acknowledged'); else indicator.classList.remove('agresso-acknowledged');
-          } catch (e) {}
-        } catch (e) {}
-      }, true);
-    } catch (e) { ackBtn = null; }
+    
 
     // Settings / override panel (only in debug mode)
     let settingsBtn = null;
@@ -538,7 +505,6 @@
     // Append toggle first so it replaces the left-side dot visually
     if (toggle) indicator.appendChild(toggle);
     if (reminderBtn) indicator.appendChild(reminderBtn);
-    if (ackBtn) indicator.appendChild(ackBtn);
     if (debugBtn) indicator.appendChild(debugBtn);
     if (settingsBtn) indicator.appendChild(settingsBtn);
     indicator.appendChild(dot);
@@ -549,7 +515,6 @@
     indicatorDoc.body.appendChild(indicator);
     try { applyToggleState(getToggleEnabled()); } catch (e) {}
     try { updateReminderButtonState(reminderBtn); } catch (e) {}
-    try { updateAckButtonState(ackBtn); } catch (e) {}
     try { if (settingsPanel) indicatorDoc.body.appendChild(settingsPanel); } catch (e) {}
     return indicator;
   }
@@ -831,7 +796,6 @@
               }
             } catch (e) {}
             try { localStorage.removeItem(PERIOD_NOTIFY_KEY); } catch (e) {}
-            try { localStorage.removeItem(PERIOD_ACK_KEY); } catch (e) {}
             try { if (periodStatusRefreshTimer) { clearInterval(periodStatusRefreshTimer); periodStatusRefreshTimer = null; } } catch (e) {}
               try { if (periodHighlightEnforcer) { clearInterval(periodHighlightEnforcer); periodHighlightEnforcer = null; } } catch (e) {}
             try { highlightStatusField(false); } catch (e) {}
@@ -1444,7 +1408,6 @@
   const REMINDER_ENABLED_KEY = 'agresso_period_notify_enabled';
   const REMINDER_LANG_KEY = 'agresso_period_notify_lang';
   const PERIOD_OVERRIDE_KEY = 'agresso_period_override';
-  const PERIOD_ACK_KEY = 'agresso_period_ack_date';
 
   function getReminderEnabled() {
     try {
@@ -1501,32 +1464,6 @@
       try { btn.setAttribute('aria-pressed', String(enabled)); } catch (e) {}
       btn.title = enabled ? (lang === 'en' ? 'Reminder: On (en) - Shift+click to switch language' : 'Påminnelse: På (sv) - Shift+click för språk') : (lang === 'en' ? 'Reminder: Off - click to enable' : 'Påminnelse: Av - klicka för att aktivera');
       btn.style.opacity = enabled ? '1' : '0.45';
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  function getPeriodAckDate() {
-    try { return localStorage.getItem(PERIOD_ACK_KEY); } catch (e) { return null; }
-  }
-
-  function setPeriodAckDate(v) {
-    try { localStorage.setItem(PERIOD_ACK_KEY, String(v)); } catch (e) {}
-  }
-
-  function clearPeriodAckDate() {
-    try { localStorage.removeItem(PERIOD_ACK_KEY); } catch (e) {}
-  }
-
-  function updateAckButtonState(btn) {
-    try {
-      const indicator = ensureIndicator();
-      const b = btn || indicator.querySelector('.agresso-ack-btn');
-      if (!b) return;
-      const ack = getPeriodAckDate();
-      try { b.setAttribute('aria-pressed', String(!!ack)); } catch (e) {}
-      b.style.opacity = ack ? '1' : '0.55';
-      b.title = ack ? 'Acknowledged (click to undo)' : 'Acknowledge reminder (click to mark)';
     } catch (e) {
       // ignore
     }
@@ -2495,16 +2432,7 @@
               const subEl = indicator.querySelector('.agresso-autosave-sub'); if (subEl) subEl.style.color = '#ffecec';
             } catch (e) {}
             try { highlightStatusField(true); } catch (e) {}
-            // If previously acknowledged for this period, mark acknowledged
-            try {
-              const ack = getPeriodAckDate();
-              if (ack === endIso) {
-                indicator.classList.add('agresso-acknowledged');
-              } else {
-                indicator.classList.remove('agresso-acknowledged');
-              }
-            } catch (e) {}
-            try { updateAckButtonState(); } catch (e) {}
+            
           } catch (e) {}
 
             // Also attempt to update the top-level document's indicator so the
@@ -2537,10 +2465,7 @@
                       topInd.style.border = '2px solid rgba(217,83,79,0.9)';
                       topInd.style.background = 'linear-gradient(180deg, rgba(36,41,50,0.95), rgba(30,25,28,0.95))';
                     } catch (e) {}
-                    try {
-                      const ack = (window.top && window.top.localStorage) ? window.top.localStorage.getItem(PERIOD_ACK_KEY) : null;
-                      if (ack === endIso) topInd.classList.add('agresso-acknowledged'); else topInd.classList.remove('agresso-acknowledged');
-                    } catch (e) {}
+                    
                   }
                 } catch (e) {}
               }
@@ -2666,22 +2591,7 @@
                     }
                   } catch (e) {}
                 }, true);
-                // Dismiss action (ack)
-                const ackBtn = doc.createElement('button');
-                ackBtn.textContent = '✓ Acknowledge';
-                ackBtn.style.background = 'transparent';
-                ackBtn.style.color = '#fff';
-                ackBtn.style.border = '1px solid rgba(255,255,255,0.2)';
-                ackBtn.style.padding = '6px 8px';
-                ackBtn.style.borderRadius = '6px';
-                ackBtn.style.cursor = 'pointer';
-                ackBtn.addEventListener('click', (ev) => {
-                  ev.stopPropagation(); ev.preventDefault();
-                  try { const last = (() => { try { return localStorage.getItem(PERIOD_NOTIFY_KEY); } catch (e) { return null; } })() || (new Date()).toISOString().slice(0,10); setPeriodAckDate(last); } catch (e) {}
-                  try { const ex = doc.getElementById('agresso-period-banner'); if (ex && ex.parentNode) ex.parentNode.removeChild(ex); } catch (e) {}
-                }, true);
                 controls.appendChild(btn);
-                controls.appendChild(ackBtn);
                 ban.appendChild(expl);
                 ban.appendChild(txt);
                 ban.appendChild(controls);
@@ -2748,8 +2658,7 @@
               // Stop if notify key no longer matches or ack equals endIso
               let topNotify = null; try { topNotify = (window.top && window.top.localStorage) ? window.top.localStorage.getItem(PERIOD_NOTIFY_KEY) : null; } catch (e) { topNotify = null; }
               let localNotify = null; try { localNotify = localStorage.getItem(PERIOD_NOTIFY_KEY); } catch (e) { localNotify = null; }
-              let ack = null; try { ack = (window.top && window.top.localStorage) ? window.top.localStorage.getItem(PERIOD_ACK_KEY) : localStorage.getItem(PERIOD_ACK_KEY); } catch (e) { ack = null; }
-              if ((topNotify !== endIso && localNotify !== endIso) || ack === endIso) {
+              if ((topNotify !== endIso && localNotify !== endIso)) {
                 try { clearInterval(periodHighlightEnforcer); periodHighlightEnforcer = null; } catch (e) {}
                 try { removeSubmitBanner(document); } catch (e) {}
                 try { if (window.top && window.top.document && window.top !== window) removeSubmitBanner(window.top.document); } catch (e) {}
@@ -3156,8 +3065,7 @@
                     try {
                       const topN = (window.top && window.top.localStorage) ? window.top.localStorage.getItem(PERIOD_NOTIFY_KEY) : null;
                       const locN = localStorage.getItem(PERIOD_NOTIFY_KEY);
-                      const ack = (window.top && window.top.localStorage) ? window.top.localStorage.getItem(PERIOD_ACK_KEY) : localStorage.getItem(PERIOD_ACK_KEY);
-                      if ((topN !== endIso && locN !== endIso) || ack === endIso) {
+                      if ((topN !== endIso && locN !== endIso)) {
                         try { clearInterval(periodHighlightEnforcer); periodHighlightEnforcer = null; } catch (e) {}
                       }
                     } catch (e) {}

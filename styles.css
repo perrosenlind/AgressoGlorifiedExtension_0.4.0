@@ -219,19 +219,4 @@ html.agresso-dark-mode .k-grid tr:hover {
 }
 
 /* Acknowledged state: still highlighted but visually marked as acknowledged */
-#agresso-autosave-indicator.agresso-acknowledged {
-    opacity: 0.96;
-}
-
-#agresso-autosave-indicator.agresso-acknowledged .agresso-autosave-timer {
-    background: #d9534f !important;
-    height: 4px;
-    box-shadow: 0 0 4px rgba(217,83,79,0.35);
-    animation: none !important;
-    opacity: 0.85;
-}
-
-/* Acknowledge button visuals */
-#agresso-autosave-indicator .agresso-ack-btn {
-    font-weight: 700;
-}
+/* (Acknowledgement UI removed) */
