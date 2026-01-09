@@ -790,6 +790,15 @@
 
   function resetTimerBar(durationMs) {
     const bar = ensureTimerBar();
+    // If indicator is paused, keep the bar full and don't animate it
+    try {
+      const parentIndicator = bar.closest && bar.closest('#' + INDICATOR_ID);
+      if (parentIndicator && parentIndicator.classList.contains('agresso-paused')) {
+        try { bar.style.transition = 'none'; } catch (e) {}
+        try { bar.style.width = '100%'; } catch (e) {}
+        return;
+      }
+    } catch (e) {}
     // Disable any CSS animations/transforms that may conflict
     try { bar.style.animation = 'none'; } catch (e) {}
     try { bar.style.transform = 'none'; } catch (e) {}
@@ -819,6 +828,15 @@
   function stopTimerBar() {
     const bar = timerBar || ensureTimerBar();
     try { bar.style.animation = 'none'; } catch (e) {}
+    // If indicator is paused, keep it full instead of collapsing
+    try {
+      const parentIndicator = bar.closest && bar.closest('#' + INDICATOR_ID);
+      if (parentIndicator && parentIndicator.classList.contains('agresso-paused')) {
+        try { bar.style.transition = 'none'; } catch (e) {}
+        try { bar.style.width = '100%'; } catch (e) {}
+        return;
+      }
+    } catch (e) {}
     bar.style.transition = 'none';
     bar.style.width = '0px';
   }
@@ -857,6 +875,21 @@
     if (sub) {
       sub.textContent = subText;
     }
+
+    // If label/subtext indicate autosave is paused, mark indicator so
+    // timer-bar logic can keep the bar full and ignore activity.
+    try {
+      const hint = ((labelText || '') + ' ' + (subText || '')).toLowerCase();
+      if (hint.indexOf('autosave paused') >= 0 || hint.indexOf('inga ändringar gjorda') >= 0 || hint.indexOf('autosave disabled') >= 0) {
+        try { indicator.classList.add('agresso-paused'); } catch (e) {}
+        try {
+          const bar = indicator.querySelector('.agresso-autosave-timer');
+          if (bar) { bar.style.transition = 'none'; bar.style.width = '100%'; }
+        } catch (e) {}
+      } else {
+        try { indicator.classList.remove('agresso-paused'); } catch (e) {}
+      }
+    } catch (e) {}
 
     positionIndicatorNearSaveButton();
     // If we just reached a saved state, clear any period-end highlight
@@ -1153,6 +1186,16 @@
     // If we're in a frame (not the top window), forward activity to the top window
     try {
       if (window.top && window.top !== window) {
+        // If the top-level indicator is paused, don't forward or restart
+        try {
+          const topDoc = window.top.document;
+          const topInd = topDoc && topDoc.getElementById && topDoc.getElementById(INDICATOR_ID);
+          if (topInd && topInd.classList && topInd.classList.contains('agresso-paused')) {
+            return;
+          }
+        } catch (e) {
+          // cross-origin may throw; ignore
+        }
         window.top.postMessage({ type: ACTIVITY_MESSAGE, ts: Date.now() }, '*');
         return;
       }
@@ -1160,8 +1203,17 @@
       // ignore cross-origin access; fall through to local handling
     }
 
+    // If local/top indicator is marked paused, don't restart timer on movement/clicks
+    try {
+      const doc = getIndicatorDocument();
+      const ind = doc && doc.getElementById && doc.getElementById(INDICATOR_ID);
+      if (ind && ind.classList && ind.classList.contains('agresso-paused')) return;
+    } catch (e) {
+      // ignore
+    }
+
     lastActivityAt = Date.now();
-    // Always restart timer on activity
+    // Restart idle countdown on activity
     startTimer(IDLE_TIMEOUT_MS, 'idle');
   }
 
@@ -1200,15 +1252,37 @@
         minute: '2-digit',
         second: '2-digit'
       });
-      setIndicator('saved', 'Saved', `at ${timestamp}`);
-      // Restart idle countdown after a save completes
-      lastActivityAt = Date.now();
-      startTimer(IDLE_TIMEOUT_MS, 'idle');
+      try {
+        // If the indicator (or a no-changes banner) indicates paused state
+        // after save, preserve the paused state and do not restart timer.
+        const doc = getIndicatorDocument();
+        const ind = doc && doc.getElementById ? doc.getElementById(INDICATOR_ID) : null;
+        const pausedNow = (ind && ind.classList && ind.classList.contains('agresso-paused')) || noChangesBannerVisible || isNoChangesBannerVisible();
+        if (pausedNow) {
+          try { setIndicator('pending', 'Autosave paused', ''); } catch (e) {}
+          try { stopTimer(); } catch (e) {}
+        } else {
+          setIndicator('saved', 'Saved', `at ${timestamp}`);
+          // Restart idle countdown after a save completes
+          lastActivityAt = Date.now();
+          startTimer(IDLE_TIMEOUT_MS, 'idle');
+        }
+      } catch (e) {
+        // Fallback: behave as saved
+        try { setIndicator('saved', 'Saved', `at ${timestamp}`); } catch (e2) {}
+        try { lastActivityAt = Date.now(); startTimer(IDLE_TIMEOUT_MS, 'idle'); } catch (e2) {}
+      }
       if (pendingRow) {
         pendingRow.dataset.agressoDirty = '0';
         pendingRow = null;
       }
     }, 1500);
+    // After save completes, give the page a short moment and then re-check
+    // for the "no changes" banner. If present, follow existing procedure
+    // (refreshNoChangesBannerState will pause/stop timers as needed).
+    window.setTimeout(() => {
+      try { refreshNoChangesBannerState('post-save-check'); } catch (e) {}
+    }, 800);
   }
 
   function getDirtyRow() {
