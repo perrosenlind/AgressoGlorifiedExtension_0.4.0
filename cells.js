@@ -962,25 +962,64 @@
       const docs = getAllDocuments();
       for (const doc of docs) {
         try {
-          // Look for nearby label or heading that mentions 'Status'
-          const labelNode = Array.from(doc.querySelectorAll('label, th, td, div, span'))
-            .find(n => /\bstatus\b/i.test((n.textContent||'').trim()));
-          if (labelNode) {
-            // Try to find a select/input in the same row or parent
-            const container = labelNode.closest('tr') || labelNode.parentElement || doc;
-            const input = container.querySelector('select, input[type="text"], input');
-            if (input) {
-              const val = (input.value || (input.selectedOptions && input.selectedOptions[0] && input.selectedOptions[0].text) || '').trim().toLowerCase();
-              if (val.includes('klar')) return true;
+          // First try: hidden RowDescription / RowValue inputs which often
+          // accompany datalist controls. RowDescription typically contains
+          // the human-readable text like 'Klar'.
+          try {
+            const desc = doc.querySelector('input[id$="RowDescription"], input[name$="RowDescription"], input[id*="RowDescription"], input[name*="RowDescription"]');
+            if (desc && (desc.value || desc.getAttribute('value'))) {
+              const v = (desc.value || desc.getAttribute('value') || '').toString().trim().toLowerCase();
+              if (v.indexOf('klar') >= 0) return true;
             }
-          }
+          } catch (e) {}
 
-          // Fallback: check any select's selected option text for 'Klar'
+          try {
+            const valIn = doc.querySelector('input[id$="RowValue"], input[name$="RowValue"], input[id*="RowValue"], input[name*="RowValue"]');
+            if (valIn && (valIn.value || valIn.getAttribute('value'))) {
+              const vv = (valIn.value || valIn.getAttribute('value') || '').toString().trim().toLowerCase();
+              // Some implementations use 'N' to indicate the selected item
+              if (vv === 'n' || vv.indexOf('klar') >= 0) return true;
+            }
+          } catch (e) {}
+
+          // Next, try datalistcontrol elements that have title='Status' and
+          // contain an input with the human-readable description.
+          try {
+            const dl = Array.from(doc.querySelectorAll('datalistcontrol')).find(d => {
+              try { return (d.getAttribute('title') || '').toLowerCase().indexOf('status') >= 0; } catch (e) { return false; }
+            });
+            if (dl) {
+              try {
+                const inner = dl.querySelector('input');
+                if (inner && (inner.value || inner.getAttribute('value'))) {
+                  const v = (inner.value || inner.getAttribute('value') || '').toString().trim().toLowerCase();
+                  if (v.indexOf('klar') >= 0) return true;
+                }
+              } catch (e) {}
+            }
+          } catch (e) {}
+
+          // Fallback: look for visible label/text mentioning 'Status' and check
+          // nearby select/input values.
+          try {
+            const labelNode = Array.from(doc.querySelectorAll('label, th, td, div, span'))
+              .find(n => /\bstatus\b/i.test((n.textContent||'').trim()));
+            if (labelNode) {
+              const container = labelNode.closest('tr') || labelNode.parentElement || doc;
+              const input = container.querySelector('select, input[type="text"], input');
+              if (input) {
+                const val = (input.value || (input.selectedOptions && input.selectedOptions[0] && input.selectedOptions[0].text) || '').toString().trim().toLowerCase();
+                if (val.indexOf('klar') >= 0) return true;
+              }
+            }
+          } catch (e) {}
+
+          // Final fallback: check any select's selected option text for 'Klar'
           const selects = Array.from(doc.querySelectorAll('select'));
           for (const s of selects) {
             try {
               const selText = (s.selectedOptions && s.selectedOptions[0] && s.selectedOptions[0].text) || (s.options && s.options[s.selectedIndex] && s.options[s.selectedIndex].text) || '';
-              if ((selText||'').toLowerCase().includes('klar')) return true;
+              if ((selText||'').toLowerCase().indexOf('klar') >= 0) return true;
             } catch (e) {}
           }
         } catch (e) {
@@ -1053,15 +1092,57 @@
             .find(n => /\bstatus\b/i.test((n.textContent||'').trim()));
           if (!labelNode) continue;
           const container = labelNode.closest('tr') || labelNode.parentElement || doc;
+          // Try to find a status input or readable text in the same container
           const input = container.querySelector('select, input[type="text"], input');
-          if (input) {
-            if (highlight) {
-              try { input.style.boxShadow = '0 0 8px rgba(217,83,79,0.65)'; input.style.background = '#fff7f7'; } catch (e) {}
-            } else {
-              try { input.style.boxShadow = ''; input.style.background = ''; } catch (e) {}
+          let val = null;
+          try {
+            if (input) {
+              const tag = (input.tagName || '').toLowerCase();
+              if (tag === 'select') {
+                val = (input.selectedOptions && input.selectedOptions[0] && input.selectedOptions[0].text) || null;
+              } else {
+                val = (input.value || input.textContent || null) || null;
+              }
             }
-            return true;
+          } catch (e) {
+            val = null;
           }
+
+          // If no form control found, try to read textual status from nearby cells
+          if (val === null || val === '') {
+            try {
+              // look for a span/div/td inside the container that contains status text
+              const textNode = container.querySelector('span, div, td, strong, b, em');
+              if (textNode) {
+                const t = (textNode.textContent || '').trim();
+                if (t) val = t;
+              }
+            } catch (e) {
+              // ignore
+            }
+          }
+
+          // If we still couldn't determine a value, do not apply highlight
+          if (val === null || (typeof val === 'string' && val.trim() === '')) {
+            if (!highlight) {
+              try { if (input) { input.style.boxShadow = ''; input.style.background = ''; } } catch (e) {}
+            }
+            return false;
+          }
+
+          const isKlar = ('' + val).toLowerCase().indexOf('klar') >= 0;
+          if (highlight) {
+            if (!isKlar) {
+              try {
+                if (input) { input.style.boxShadow = '0 0 8px rgba(217,83,79,0.65)'; input.style.background = '#fff7f7'; }
+              } catch (e) {}
+            } else {
+              try { if (input) { input.style.boxShadow = ''; input.style.background = ''; } } catch (e) {}
+            }
+          } else {
+            try { if (input) { input.style.boxShadow = ''; input.style.background = ''; } } catch (e) {}
+          }
+          return true;
         } catch (e) {
           // ignore per-doc
         }
@@ -2535,9 +2616,23 @@
     })();
     const endIso = localIsoDate(endDate) || endDate.toISOString().slice(0,10);
     console.info(LOG_PREFIX, 'showPeriodNotification: endIso', endIso, 'lastNotified', lastNotified);
+    // If the report status is already 'Klar', skip showing any notification/UI.
+    try {
+      if (isReportStatusKlar()) {
+        try { console.info(LOG_PREFIX, 'showPeriodNotification: status is Klar, skipping notification entirely'); } catch (e) {}
+        return;
+      }
+    } catch (e) {}
     if (lastNotified === endIso) {
       // Already stored as notified — ensure the visual indicator is applied
       try { console.info(LOG_PREFIX, 'showPeriodNotification: already notified, enforcing UI highlight'); } catch (e) {}
+      // If the report status is already 'Klar', do not enforce the highlight
+      try {
+        if (isReportStatusKlar()) {
+          try { console.info(LOG_PREFIX, 'showPeriodNotification: status is Klar, skipping UI enforcement'); } catch (e) {}
+          return;
+        }
+      } catch (e) {}
       try { /* force UI-only highlight without updating storage */ notifyNow(true); } catch (e) {}
       try {
         // Ask the top-level frame to enforce the highlight as well (works via postMessage
