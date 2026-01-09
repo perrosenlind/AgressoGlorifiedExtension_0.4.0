@@ -14,6 +14,8 @@
   const LOG_PREFIX = '[Agresso Autosave]';
   try { console.info(LOG_PREFIX, 'cells.js loaded'); } catch (e) {}
   const NO_CHANGES_TEXT = 'inga ändringar gjorda!';
+  // Pages sometimes show an alternate no-data banner text. Detect that too.
+  const NO_CHANGES_TEXT_ALT = 'tidrapporten är tom. inga data har sparats.';
   const SAVE_DIALOG_SELECTORS = [
     '[id^="u4_messageoverlay_success"]',
     '.u4-messageoverlay-success-header',
@@ -1176,7 +1178,7 @@
           return false;
         }
         const text = (body.innerText || '').toLowerCase();
-        return text.includes(NO_CHANGES_TEXT);
+        return text.includes(NO_CHANGES_TEXT) || text.includes(NO_CHANGES_TEXT_ALT);
       } catch (e) {
         return false;
       }
@@ -1743,34 +1745,7 @@
   function findPeriodEndDate() {
     try {
       console.info(LOG_PREFIX, 'findPeriodEndDate: start scan');
-      // Quick deterministic match: look for header DIVs that explicitly contain
-      // today's day/month (e.g. "09/01") across all reachable documents (top + frames).
-      try {
-        const now = new Date();
-        const td = now.getDate();
-        const tm = now.getMonth() + 1;
-        const tokenRe = new RegExp('\\b0?' + td + '[\\\\\/.]0?' + tm + '\\b');
-        const docs = getAllDocuments();
-        for (const doc of docs) {
-          try {
-            const candidates = Array.from(doc.querySelectorAll('.DivOverflowNoWrap, .Ellipsis, .Separator'));
-            for (const n of candidates) {
-              try {
-                const raw = (n.dataset && n.dataset.originaltext) || (n.getAttribute && n.getAttribute('title')) || n.textContent || n.innerHTML || '';
-                const cleaned = String(raw).replace(/&lt;br\s*\/?&gt;/gi, ' ').replace(/<br\s*\/?>(\s*)/gi, ' ').trim();
-                if (!tokenRe.test(cleaned)) continue;
-                const hdr = n.closest && n.closest('th,td');
-                if (hdr && typeof hdr.cellIndex === 'number') {
-                  const inferredYear = (new Date()).getFullYear();
-                  const dt = new Date(inferredYear, tm - 1, td);
-                  console.info(LOG_PREFIX, 'findPeriodEndDate: detected today by direct div match', { raw: cleaned, inFrame: doc !== document, columnIndex: hdr.cellIndex, date: dt });
-                  return dt;
-                }
-              } catch (e) {}
-            }
-          } catch (e) {}
-        }
-      } catch (e) {}
+      // (Removed deterministic "direct div match" scan to avoid static div identification)
       const indicatorEl = document.getElementById('agresso-autosave-indicator');
       let nodes = Array.from(document.querySelectorAll('h1,h2,h3,p,div,span,label,td,th'));
       if (indicatorEl) {
@@ -1877,8 +1852,9 @@
         }
       } catch (e) {}
 
-      // New: scan the entire table for day/date tokens (handles layouts where first row isn't the date row)
+        // New: scan the entire table for day/date tokens (handles layouts where first row isn't the date row)
       try {
+          try { console.info(LOG_PREFIX, 'findPeriodEndDate: table chosen for Sum-left scan', tbl2 ? { tag: tbl2.tagName, rows: (tbl2.querySelectorAll && tbl2.querySelectorAll('tr').length) || 0 } : null); } catch (e) {}
         // Prefer the table inside the 'Daglig tidregistrering' section if present
         const heading = Array.from(document.querySelectorAll('h1,h2,h3,legend,div,span,th'))
           .find(el => /Arbetstimmar|Daglig tidregistrering|Tidrapport/i.test(el.textContent||''));
@@ -1892,37 +1868,296 @@
         const matches = [];
         // Direct scan: look for floating header DIVs (DivOverflowNoWrap etc.) that contain date tokens
         try {
-          const floating = Array.from(document.querySelectorAll('.DivOverflowNoWrap, .Ellipsis, .Separator'))
-            .filter(n => {
-              try {
-                const t = (n.textContent || '') + '|' + (n.getAttribute && n.getAttribute('title') || '') + '|' + (n.dataset && n.dataset.originaltext || '') + '|' + (n.innerHTML || '');
-                return dateTokenRe.test(t);
-              } catch (e) { return false; }
-            });
-          if (floating.length) {
-            try { console.info(LOG_PREFIX, 'findPeriodEndDate: floating headers count', floating.length); } catch (e) {}
-            for (const n of floating) {
-              try {
-                const hdrCell = n.closest && n.closest('th,td');
-                if (!hdrCell) continue;
-                const raw = (n.getAttribute && n.getAttribute('title') || n.dataset && n.dataset.originaltext || n.textContent || n.innerHTML || '').replace(/<br\s*\/?>(\s*)/gi, ' ').trim();
-                const m = dateTokenRe.exec(raw);
-                if (m) {
+          const docs = getAllDocuments();
+          const floating = [];
+          for (const d of docs) {
+            try {
+              const found = Array.from(d.querySelectorAll('.DivOverflowNoWrap, .Ellipsis, .Separator'))
+                .filter(n => {
+                  try {
+                    const t = (n.textContent || '') + '|' + (n.getAttribute && n.getAttribute('title') || '') + '|' + (n.dataset && n.dataset.originaltext || '') + '|' + (n.innerHTML || '');
+                    return dateTokenRe.test(t);
+                  } catch (e) { return false; }
+                });
+              floating.push(...found);
+            } catch (e) {}
+          }
+            if (floating.length) {
+              try { console.info(LOG_PREFIX, 'findPeriodEndDate: floating headers count', floating.length); } catch (e) {}
+              const candidates = [];
+              const floatInfo = [];
+              for (const n of floating) {
+                try {
+                  const hdrCell = n.closest && n.closest('th,td');
+                  const raw = (n.getAttribute && n.getAttribute('title') || n.dataset && n.dataset.originaltext || n.textContent || n.innerHTML || '').replace(/<br\s*\/?>(\s*)/gi, ' ').trim();
+                  const m = dateTokenRe.exec(raw);
+                  if (!m) continue;
+                  const inner = n.querySelector && n.querySelector('.DivOverflowNoWrap, .Ellipsis, .Separator');
+                  const color = (inner && (window.getComputedStyle ? window.getComputedStyle(inner).color : inner.style && inner.style.color)) || (hdrCell && (window.getComputedStyle ? window.getComputedStyle(hdrCell).color : hdrCell.style && hdrCell.style.color)) || '';
+                  const bgColor = (inner && (window.getComputedStyle ? window.getComputedStyle(inner).backgroundColor : inner.style && inner.style.backgroundColor)) || (hdrCell && (window.getComputedStyle ? window.getComputedStyle(hdrCell).backgroundColor : hdrCell.style && hdrCell.style.backgroundColor)) || '';
+                  let classes = '';
+                  try { classes = hdrCell ? Array.from(hdrCell.classList || []).slice(0,8).join(' ') : (n.className || '').toString(); } catch(e){}
+                  let nearestBg = bgColor;
+                  try {
+                    let elp = inner || hdrCell || n;
+                    while (elp && elp.parentElement) {
+                      try {
+                        const cs = window.getComputedStyle ? window.getComputedStyle(elp) : null;
+                        const bg = cs && cs.backgroundColor ? cs.backgroundColor : '';
+                        if (bg && !/^(rgba\(0,\s*0,\s*0,\s*0\)|transparent)$/i.test(bg)) { nearestBg = bg; break; }
+                      } catch(e){}
+                      elp = elp.parentElement;
+                    }
+                  } catch(e){}
+                  let outer = '';
+                  try { outer = (n.outerHTML || '').slice(0,200); } catch(e){}
+                  // extract inline style color if present (helps when computedStyle differs)
+                  let inlineColor = '';
+                  try {
+                    const s = n.getAttribute && n.getAttribute('style');
+                    if (s) {
+                      const m = /color\s*:\s*([^;\s]+)/i.exec(s);
+                      if (m) inlineColor = m[1];
+                    }
+                    // also check element.style.color
+                    if (!inlineColor && n.style && n.style.color) inlineColor = n.style.color;
+                    // normalize hex shorthand to full hex
+                    if (inlineColor && /^#[0-9a-f]{3}$/i.test(inlineColor)) inlineColor = inlineColor.split('').map(c=>c+c).join('');
+                  } catch(e){}
+                  // sample rendered element at the floating node center (helps detect styles applied to other layers)
+                  let renderColor = '';
+                  let renderBg = '';
+                  let renderBefore = '';
+                  let renderAfter = '';
+                  try {
+                    const win = (n.ownerDocument && n.ownerDocument.defaultView) || window;
+                    const rect = n.getBoundingClientRect && n.getBoundingClientRect();
+                    if (rect && win && typeof win.elementFromPoint === 'function') {
+                      const cx = rect.left + (rect.width||0)/2;
+                      const cy = rect.top + (rect.height||0)/2;
+                      try {
+                        const elAt = win.elementFromPoint(cx, cy) || n;
+                        const cs = win.getComputedStyle ? win.getComputedStyle(elAt) : (elAt.style||{});
+                        renderColor = cs && cs.color ? cs.color : '';
+                        renderBg = cs && cs.backgroundColor ? cs.backgroundColor : '';
+                        try { renderBefore = win.getComputedStyle(elAt, '::before').color || ''; } catch(e){}
+                        try { renderAfter = win.getComputedStyle(elAt, '::after').color || ''; } catch(e){}
+                      } catch(e){}
+                    }
+                  } catch(e){}
+
+                  floatInfo.push({ raw: String(raw).slice(0,120), columnIndex: hdrCell ? hdrCell.cellIndex : null, color: (color||'').toString(), bgColor: (bgColor||'').toString(), classes: classes, nearestBg: (nearestBg||'').toString(), outer: outer, inlineColor: inlineColor, renderColor: renderColor, renderBg: renderBg, renderBefore: renderBefore, renderAfter: renderAfter });
+                  candidates.push({ hdrCell, raw, day: Number(m[1]), month: Number(m[2]), idx: hdrCell ? hdrCell.cellIndex : null, color, bgColor, classes, nearestBg, outer, inlineColor, renderColor, renderBg, renderBefore, renderAfter });
+                } catch (e) {}
+              }
+              try { console.info(LOG_PREFIX, 'findPeriodEndDate: floating headers info', floatInfo); } catch (e) {}
+              try { console.info(LOG_PREFIX, 'findPeriodEndDate: floating headers info json', JSON.stringify(floatInfo)); } catch (e) {}
+
+              if (candidates.length) {
+                // infer year from visible explicit date strings across reachable docs (used to compare dates)
+                let inferredYear = (new Date()).getFullYear();
+                try {
+                  const allTextNodes = [];
+                  for (const d2 of docs) {
+                    try { allTextNodes.push(...Array.from(d2.querySelectorAll('input,span,div')).map(x => (x.value||x.textContent||'').trim())); } catch(e){}
+                  }
+                  const explicit = allTextNodes.find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
+                  if (explicit) {
+                    const dd = parseDateFlexible(explicit);
+                    if (dd) inferredYear = dd.getFullYear();
+                  }
+                } catch(e){}
+
+                candidates.sort((a,b) => (b.idx || 0) - (a.idx || 0));
+                const sumTh = Array.from(document.querySelectorAll('th')).find(t => /\b(sum|summa|\u03a3)\b/i.test((t.textContent||t.getAttribute('title')||'').toLowerCase()));
+                const sumIdx = sumTh ? sumTh.cellIndex : null;
+                let chosen = null;
+
+                // helper: detect dark/black-ish colors
+                const isBlackish = (colorStr) => {
+                  if (!colorStr) return false;
+                  try {
+                    // rgba or rgb
+                    const rgbMatch = /rgba?\s*\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/i.exec(colorStr);
+                    if (rgbMatch) {
+                      const r = Number(rgbMatch[1]), g = Number(rgbMatch[2]), b = Number(rgbMatch[3]);
+                      const mx = Math.max(r,g,b), mn = Math.min(r,g,b);
+                      return mx <= 100 && (mx - mn) <= 40; // dark and low chroma
+                    }
+                    // hex formats #rrggbb or #rgb
+                    const hex = /^#([0-9a-f]{6}|[0-9a-f]{3})/i.exec(colorStr.trim());
+                    if (hex) {
+                      let h = hex[1];
+                      if (h.length === 3) h = h.split('').map(c=>c+c).join('');
+                      const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
+                      const mx = Math.max(r,g,b), mn = Math.min(r,g,b);
+                      return mx <= 100 && (mx - mn) <= 40;
+                    }
+                    // common named black/grays
+                    const lowered = (colorStr||'').toString().toLowerCase();
+                    if (['black','#000','grey','gray','darkgray','darkgrey'].includes(lowered)) return true;
+                  } catch(e){}
+                  return false;
+                };
+
+                // prefer latest date among candidates that are black/dark gray (not red)
+                try {
+                  // Gather only candidates that have an inline color and where that inline color is black/dark
+                  const blackCandidates = candidates.filter(c => {
+                    try {
+                      if (columnLooksRed(c)) return false;
+                      if (!c.inlineColor) return false;
+                      return isBlackish(c.inlineColor.toString());
+                    } catch(e){ return false; }
+                  });
+                  if (blackCandidates.length) {
+                    // pick the latest calendar date among blackCandidates
+                    let best = null; let bestTime = -Infinity;
+                    for (const c of blackCandidates) {
+                      try {
+                        const dt = new Date(inferredYear, (c.month||1)-1, c.day||1).getTime();
+                        if (dt > bestTime) { bestTime = dt; best = c; }
+                      } catch(e){}
+                    }
+                    if (best) {
+                      chosen = best;
+                      try { console.info(LOG_PREFIX, 'findPeriodEndDate: chose latest black candidate', { raw: chosen.raw, columnIndex: chosen.idx, inferredYear }); } catch(e){}
+                    }
+                  }
+                } catch(e){}
+                const isRedColorLocal = (colorStr) => {
+                  if (!colorStr) return false;
+                  const rgb = /rgb\s*\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)/i.exec(colorStr);
+                  if (rgb) {
+                    const r = Number(rgb[1]), g = Number(rgb[2]), b = Number(rgb[3]);
+                    return r > 140 && r > g + 30 && r > b + 30;
+                  }
+                  const hex = /#([0-9a-f]{6}|[0-9a-f]{3})/i.exec(colorStr);
+                  if (hex) {
+                    let h = hex[1]; if (h.length === 3) h = h.split('').map(c=>c+c).join('');
+                    const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
+                    return r > 140 && r > g + 30 && r > b + 30;
+                  }
+                  return false;
+                };
+
+                const columnLooksRed = (candidate) => {
+                  try {
+                    if (isRedColorLocal(candidate.color) || isRedColorLocal(candidate.bgColor)) return true;
+                    let tbl = candidate.hdrCell && candidate.hdrCell.closest && candidate.hdrCell.closest('table');
+                    if (!tbl) {
+                      try {
+                        const docsAll = getAllDocuments();
+                        const token = (candidate.raw || '').replace(/\s+-\s+Sidhuvud$/i, '').split(/\s+/).slice(0,3).join(' ');
+                        for (const d of docsAll) {
+                          try {
+                            const tables = Array.from(d.querySelectorAll('table'));
+                            for (const t of tables) {
+                              try {
+                                const hdr = t.querySelector('thead tr') || t.querySelector('tr');
+                                if (!hdr) continue;
+                                const cells = Array.from(hdr.querySelectorAll('th,td'));
+                                const match = cells.find(c => {
+                                  try {
+                                    const inner = c.querySelector && c.querySelector('.DivOverflowNoWrap, .Ellipsis, .Separator');
+                                    const txt = (inner && (inner.getAttribute && inner.getAttribute('title') || inner.dataset && inner.dataset.originaltext || inner.textContent || inner.innerHTML)) || (c.getAttribute && c.getAttribute('title') || c.textContent || c.innerHTML) || '';
+                                    return (txt || '').indexOf(token) >= 0 || (candidate.idx !== undefined && (c.cellIndex === candidate.idx));
+                                  } catch (e) { return false; }
+                                });
+                                if (match) { tbl = t; break; }
+                              } catch (e) {}
+                            }
+                            if (tbl) break;
+                          } catch (e) {}
+                        }
+                      } catch (e) {}
+                    }
+                    if (!tbl) {
+                      try { console.info(LOG_PREFIX, 'findPeriodEndDate: no owning table found for floating candidate', { raw: candidate.raw, columnIndex: candidate.idx }); } catch (e) {}
+                      return false;
+                    }
+                    const rows = Array.from(tbl.querySelectorAll('tr'));
+                    let checked = 0;
+                    for (let r = 1; r < rows.length && checked < 6; r++) {
+                      try {
+                        const cell = rows[r].cells && rows[r].cells[candidate.idx];
+                        if (!cell) continue;
+                        const txt = (cell.textContent || '').trim();
+                        if (!txt) continue;
+                        checked++;
+                        const innerCell = cell.querySelector && cell.querySelector('.DivOverflowNoWrap, .Ellipsis, .Separator');
+                        const cellColor = (innerCell && (window.getComputedStyle ? window.getComputedStyle(innerCell).color : innerCell.style && innerCell.style.color)) || (window.getComputedStyle ? window.getComputedStyle(cell).color : cell.style && cell.style.color) || '';
+                        const cellBg = (innerCell && (window.getComputedStyle ? window.getComputedStyle(innerCell).backgroundColor : innerCell.style && innerCell.style.backgroundColor)) || (window.getComputedStyle ? window.getComputedStyle(cell).backgroundColor : cell.style && cell.style.backgroundColor) || '';
+                        if (isRedColorLocal(cellColor) || isRedColorLocal(cellBg)) return true;
+                      } catch (e) { /* ignore row errors */ }
+                    }
+                  } catch (e) {}
+                  return false;
+                };
+
+                if (!chosen) {
+                  if (sumIdx !== null) {
+                    for (const c of candidates) {
+                      if (c.idx >= sumIdx) continue;
+                      if (columnLooksRed(c)) {
+                        try { console.info(LOG_PREFIX, 'findPeriodEndDate: skipping floating candidate because column looks red', { raw: c.raw, columnIndex: c.idx, color: c.color, bgColor: c.bgColor }); } catch (e) {}
+                        continue;
+                      }
+                      chosen = c; break;
+                    }
+                  }
+                }
+                if (!chosen) {
+                  for (const c of candidates) {
+                    if (columnLooksRed(c)) {
+                      try { console.info(LOG_PREFIX, 'findPeriodEndDate: skipping floating candidate because column looks red', { raw: c.raw, columnIndex: c.idx, color: c.color, bgColor: c.bgColor }); } catch (e) {}
+                      continue;
+                    }
+                    chosen = c; break;
+                  }
+                }
+                if (!chosen) chosen = candidates[0];
+
+                try {
                   let inferredYear = (new Date()).getFullYear();
                   try {
-                    const explicit = Array.from(document.querySelectorAll('input,span,div')).map(x => (x.value||x.textContent||'').trim()).find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
+                    const allTextNodes = [];
+                    for (const d2 of docs) {
+                      try { allTextNodes.push(...Array.from(d2.querySelectorAll('input,span,div')).map(x => (x.value||x.textContent||'').trim())); } catch (e) {}
+                    }
+                    const explicit = allTextNodes.find(v => /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(v));
                     if (explicit) {
                       const d = parseDateFlexible(explicit);
                       if (d) inferredYear = d.getFullYear();
                     }
                   } catch (e) {}
-                  const dt = new Date(inferredYear, Number(m[2]) - 1, Number(m[1]));
-                  console.info(LOG_PREFIX, 'findPeriodEndDate: detected end by floating header', { raw, columnIndex: hdrCell.cellIndex, date: dt });
+
+                  // Enforce: if any header candidates have inlineColor that is blackish,
+                  // choose the latest date among those headers and override `chosen`.
+                  try {
+                    const inlineBlack = candidates.filter(c => c && c.inlineColor && isBlackish(c.inlineColor.toString()));
+                    if (inlineBlack.length) {
+                      let bestH = null; let bestT = -Infinity;
+                      for (const c of inlineBlack) {
+                        try {
+                          if (!c.day || !c.month) continue;
+                          const dtVal = new Date(inferredYear, (c.month||1)-1, c.day||1).getTime();
+                          if (dtVal > bestT) { bestT = dtVal; bestH = c; }
+                        } catch(e){}
+                      }
+                      if (bestH) {
+                        chosen = bestH;
+                        try { console.info(LOG_PREFIX, 'findPeriodEndDate: overriding chosen with latest inline-black header', { raw: chosen.raw, columnIndex: chosen.idx }); } catch(e){}
+                      }
+                    }
+                  } catch(e){}
+                  const dt = new Date(inferredYear, (chosen.month || 1) - 1, chosen.day || 1);
+                  console.info(LOG_PREFIX, 'findPeriodEndDate: detected end by floating header (chosen)', { raw: chosen.raw, columnIndex: chosen.idx, date: dt });
+                  try { console.info(LOG_PREFIX, 'findPeriodEndDate: floating chosen json', JSON.stringify({ raw: chosen.raw, columnIndex: chosen.idx, date: dt.toISOString(), color: chosen.color, bgColor: chosen.bgColor, classes: chosen.classes, nearestBg: chosen.nearestBg, outer: chosen.outer })); } catch (e) {}
                   return dt;
-                }
-              } catch (e) {}
+                } catch (e) {}
+              }
             }
-          }
         } catch (e) {}
         if (candidateTables.length) {
           let best = null;
@@ -1946,7 +2181,37 @@
           tbl2 = best || candidateTables[0];
         } else {
           try { console.info(LOG_PREFIX, 'findPeriodEndDate: no candidateTables found under tableRoot'); } catch (e) {}
-          tbl2 = tableRoot.querySelector('table');
+          // If none found under the chosen tableRoot, fall back to searching all reachable documents
+          try {
+            const docs = getAllDocuments();
+            const allTables = [];
+            for (const d of docs) {
+              try { allTables.push(...Array.from(d.querySelectorAll('table'))); } catch (e) {}
+            }
+            if (allTables.length) {
+              // Score tables across documents similarly to the candidateTables path
+              let bestGlobal = null;
+              let bestGlobalScore = 0;
+              allTables.forEach((t) => {
+                try {
+                  const txt = (t.innerText || '').trim();
+                  let score = 0;
+                  if (dateTokenRe.test(txt)) score += 10;
+                  const dayMatches = txt.match(/\b\d{1,2}[\/\.]\d{1,2}\b/g) || [];
+                  score += dayMatches.length;
+                  const cols = t.querySelectorAll('tr:first-child th, tr:first-child td').length || 0;
+                  const rows = t.querySelectorAll('tr').length || 0;
+                  score += Math.min(10, cols) + Math.min(5, rows);
+                  if (score > bestGlobalScore) { bestGlobalScore = score; bestGlobal = t; }
+                } catch (e) {}
+              });
+              tbl2 = bestGlobal || allTables[0];
+            } else {
+              tbl2 = tableRoot.querySelector('table');
+            }
+          } catch (e) {
+            tbl2 = tableRoot.querySelector('table');
+          }
         }
 
         // New heuristic: locate a header cell labelled 'Sum' (or variants) and scan left
@@ -1968,13 +2233,26 @@
               }
             } catch (e) {}
             if (headerRow) {
+              try {
+                // Collect header text and computed color for debugging
+                const hdrCells = Array.from(headerRow.querySelectorAll('th,td'));
+                const headerInfo = hdrCells.map((h, ci) => {
+                  try {
+                    const inner = h.querySelector && h.querySelector('.DivOverflowNoWrap, .Ellipsis, .Separator');
+                    const rawText = (inner && ((inner.dataset && inner.dataset.originaltext) || inner.getAttribute && inner.getAttribute('title') || inner.textContent || inner.innerHTML)) || (h && (h.getAttribute && h.getAttribute('title') || h.textContent || h.innerHTML)) || '';
+                    let color = '';
+                    try { color = (window.getComputedStyle ? window.getComputedStyle(inner || h).color : (inner && inner.style && inner.style.color) || (h && h.style && h.style.color)) || ''; } catch (e) { color = ''; }
+                    return { idx: (h.cellIndex || ci), text: String(rawText).replace(/<br\s*\/?>(\s*)/gi, ' ').trim().slice(0,120), color };
+                  } catch (e) { return { idx: ci, text: '', color: '' }; }
+                });
+                try { console.info(LOG_PREFIX, 'findPeriodEndDate: header info', headerInfo); } catch (e) {}
+              } catch (e) {}
               const headers = Array.from(headerRow.querySelectorAll('th,td'));
               const sumIdx = headers.findIndex(h => /\b(sum|summa|\u03a3)\b/i.test((h.textContent||'').trim()));
-              if (sumIdx > 0) {
+                if (sumIdx > 0) {
                 // helper to detect red-ish colors
                 const isRedColor = (colorStr) => {
                   if (!colorStr) return false;
-                  // colorStr like 'rgb(217, 83, 79)' or '#d9534f'
                   const rgb = /rgb\s*\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)/i.exec(colorStr);
                   if (rgb) {
                     const r = Number(rgb[1]), g = Number(rgb[2]), b = Number(rgb[3]);
@@ -1982,8 +2260,7 @@
                   }
                   const hex = /#([0-9a-f]{6}|[0-9a-f]{3})/i.exec(colorStr);
                   if (hex) {
-                    let h = hex[1];
-                    if (h.length === 3) h = h.split('').map(c=>c+c).join('');
+                    let h = hex[1]; if (h.length === 3) h = h.split('').map(c=>c+c).join('');
                     const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
                     return r > 140 && r > g + 30 && r > b + 30;
                   }
@@ -1994,8 +2271,11 @@
                 for (let ci = sumIdx - 1; ci >= 0; ci--) {
                   try {
                     const headerCell = headers[ci];
-                    // quick check on header color
-                    const headerColor = headerCell && (window.getComputedStyle ? window.getComputedStyle(headerCell).color : headerCell.style && headerCell.style.color);
+                    // prefer inner DivOverflowNoWrap / Ellipsis / Separator when reading color/text
+                    let headerInner = null;
+                    try { headerInner = headerCell && headerCell.querySelector && headerCell.querySelector('.DivOverflowNoWrap, .Ellipsis, .Separator'); } catch (e) { headerInner = null; }
+                    // quick check on header color (prefer inner element if present)
+                    const headerColor = (headerInner && (window.getComputedStyle ? window.getComputedStyle(headerInner).color : headerInner.style && headerInner.style.color)) || (headerCell && (window.getComputedStyle ? window.getComputedStyle(headerCell).color : headerCell.style && headerCell.style.color));
                     let colIsRed = isRedColor(headerColor);
 
                     // If header not red, inspect up to first 6 data rows in that column
@@ -2008,7 +2288,10 @@
                         const txt = (cell.textContent || '').trim();
                         if (!txt) continue;
                         checked++;
-                        const cellColor = window.getComputedStyle ? window.getComputedStyle(cell).color : cell.style && cell.style.color;
+                        // prefer inner styled element inside the data cell
+                        let cellInner = null;
+                        try { cellInner = cell.querySelector && cell.querySelector('.DivOverflowNoWrap, .Ellipsis, .Separator'); } catch (e) { cellInner = null; }
+                        const cellColor = (cellInner && (window.getComputedStyle ? window.getComputedStyle(cellInner).color : cellInner.style && cellInner.style.color)) || (window.getComputedStyle ? window.getComputedStyle(cell).color : cell.style && cell.style.color);
                         if (isRedColor(cellColor)) {
                           colIsRed = true;
                           break;
@@ -2020,7 +2303,8 @@
                       // Try to parse a date token from the header cell, its attributes, or inner HTML
                       let txt = '';
                       try {
-                        txt = (headerCell && (headerCell.textContent || headerCell.getAttribute('title') || headerCell.dataset && headerCell.dataset.originaltext || headerCell.innerHTML)) || '';
+                        const sourceEl = (headerInner && headerInner.nodeType) ? headerInner : headerCell;
+                        txt = (sourceEl && (sourceEl.textContent || sourceEl.getAttribute && sourceEl.getAttribute('title') || sourceEl.dataset && sourceEl.dataset.originaltext || sourceEl.innerHTML)) || '';
                         // Replace any <br> tags with spaces for parsing
                         txt = String(txt).replace(/<br\s*\/?>(\s*)/gi, ' ');
                         txt = txt.trim();
@@ -2945,26 +3229,48 @@
 
   function checkPeriodAndNotify(context) {
     try {
+      // Helper: normalize to start of day for comparisons
+      const startOfDay = (d) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
+      const todayStart = startOfDay(new Date());
+
       // Respect manual override first
       const override = getOverrideDate();
       if (override) {
         console.info(LOG_PREFIX, 'checkPeriodAndNotify: using override', override);
-        if (isSameDay(override, new Date())) { showPeriodNotification(override); console.info(LOG_PREFIX, 'checkPeriodAndNotify: override matched today'); return true; }
-        console.info(LOG_PREFIX, 'checkPeriodAndNotify: override not today');
+        try {
+          const overrideStart = startOfDay(override);
+          if (overrideStart.getTime() >= todayStart.getTime()) {
+            if (!isReportStatusKlar()) {
+              showPeriodNotification(override);
+              console.info(LOG_PREFIX, 'checkPeriodAndNotify: override is today-or-later, notified');
+              return true;
+            } else {
+              console.info(LOG_PREFIX, 'checkPeriodAndNotify: override is today-or-later but status Klar, not notifying');
+              return false;
+            }
+          }
+          console.info(LOG_PREFIX, 'checkPeriodAndNotify: override is before today');
+        } catch (e) {
+          console.info(LOG_PREFIX, 'checkPeriodAndNotify: override parsing error', e);
+        }
         return false;
       }
+
       const end = findPeriodEndDate();
       if (!end) {
         console.info(LOG_PREFIX, 'checkPeriodAndNotify: no end date found');
         return false;
       }
+      const endStart = startOfDay(end);
       const today = new Date();
       console.info(LOG_PREFIX, 'checkPeriodAndNotify: found end date', localIsoDate(end) || end.toISOString().slice(0,10), 'today', localIsoDate(today) || today.toISOString().slice(0,10));
-      if (isSameDay(end, today)) {
-        showPeriodNotification(end);
-        // Unless the report is confirmed 'Klar', force the GUI timer bar to red
-        try {
-          if (!isReportStatusKlar()) {
+
+      // Notify when the period end is today or in the future, but only until Status becomes 'Klar'
+      if (endStart.getTime() >= todayStart.getTime()) {
+        if (!isReportStatusKlar()) {
+          showPeriodNotification(end);
+          // Force the GUI timer bar to red when not 'Klar'
+          try {
             const applyRedUI = (doc) => {
               try {
                 const d = doc || document;
@@ -2999,13 +3305,15 @@
             };
             try { applyRedUI(document); } catch (e) {}
             try { if (window.top && window.top.document && window.top !== window) applyRedUI(window.top.document); } catch (e) {}
-          }
-        } catch (e) {}
+          } catch (e) {}
 
-        console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is today, notified');
-        return true;
+          console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is today-or-later, notified');
+          return true;
+        }
+        console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is today-or-later but status Klar, not notifying');
+        return false;
       }
-      console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is not today');
+      console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is before today');
     } catch (e) {
       // ignore
     }
@@ -3145,12 +3453,29 @@
       }
       refreshNoChangesBannerState('mutation');
       scheduleLayoutRefresh();
-        // Check whether today is the last day in the currently shown period and notify once
-        try { checkPeriodAndNotify('mutation'); } catch (e) { /* ignore */ }
+        // Check whether today is the last day in the currently shown period and notify once.
+        // Run this after a short debounce so transient DOM swaps during navigation
+        // don't cause false negatives/positives.
+        try {
+          if (periodStatusRefreshTimer) clearTimeout(periodStatusRefreshTimer);
+          periodStatusRefreshTimer = window.setTimeout(() => {
+            try { checkPeriodAndNotify('mutation'); } catch (e) { /* ignore */ }
+            periodStatusRefreshTimer = null;
+          }, 300);
+        } catch (e) { /* ignore */ }
       bindIndicatorTracking();
       bindActivityListeners();
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    // Observe the document root (documentElement) rather than `body` so the
+    // observer stays active if the page replaces or re-creates <body> during
+    // client-side navigation (common on SPA-like pages).
+    const rootNode = document.documentElement || document.body;
+    try {
+      observer.observe(rootNode, { childList: true, subtree: true });
+    } catch (e) {
+      // fallback to observing body if documentElement isn't available for some reason
+      try { observer.observe(document.body, { childList: true, subtree: true }); } catch (err) { /* ignore */ }
+    }
   }
 
   function init() {
