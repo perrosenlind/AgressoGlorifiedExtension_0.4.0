@@ -14,9 +14,13 @@
     z-index: 9999;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 0 12px;
-    height: 34px;
+     gap: 6px;
+     /* Make top and bottom padding equal so the space above the text
+         matches the space between the text and the progress bar. */
+      /* Keep top and bottom padding equal; use a slightly larger value
+          so the progress bar (absolute at the bottom) doesn't overlap text. */
+      padding: 8px 12px;
+      min-height: 36px;
     min-width: 180px;
     border-radius: 4px;
     background: rgba(15, 23, 42, 0.9);
@@ -148,11 +152,23 @@ html.agresso-dark-mode .k-grid tr:hover {
 
 #agresso-autosave-indicator .agresso-autosave-label {
     font-weight: 600;
+    /* Prevent label from wrapping onto multiple lines; ellipsize if needed. */
+    display: inline-block;
+    max-width: 10rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 #agresso-autosave-indicator .agresso-autosave-sub {
     color: #cbd5e1;
     font-size: 12px;
+    /* Subtext should also stay on one line and be shorter than the label. */
+    display: inline-block;
+    max-width: 8rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 #agresso-autosave-indicator.agresso-saving {

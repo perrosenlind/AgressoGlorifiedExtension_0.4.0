@@ -148,6 +148,49 @@
     }
   ];
 
+  // Apply configured field style rules to matching elements.
+  function applyFieldSizing() {
+    try {
+      FIELD_STYLE_RULES.forEach((r) => {
+        try {
+          const els = document.querySelectorAll(r.selector);
+          els.forEach((el) => {
+            try {
+              el.style.cssText = (el.style.cssText || '') + ';' + r.style;
+            } catch (e) {}
+          });
+        } catch (e) {}
+      });
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // Lightweight project-label augmentation. Kept minimal to avoid layout thrash
+  // — this is intentionally a no-op if the page doesn't contain target fields.
+  function addProjectLabels() {
+    try {
+      // Example: add a subtle label next to work_order fields for clarity
+      const nodes = document.querySelectorAll('[data-fieldname="work_order"]');
+      nodes.forEach((n) => {
+        try {
+          if (n && !n.dataset.agressoLabelAdded) {
+            n.dataset.agressoLabelAdded = '1';
+            // don't mutate heavy markup; just set a title attribute as gentle augmentation
+            try { n.setAttribute('title', (n.getAttribute('title') || '') + ' (Work order)'); } catch (e) {}
+          }
+        } catch (e) {}
+      });
+    } catch (e) {}
+  }
+
+  // Central layout enhancer used during init and on layout refresh.
+  function enhanceLayout() {
+    try { applyFieldSizing(); } catch (e) {}
+    try { positionIndicatorNearSaveButton(); } catch (e) {}
+    try { addProjectLabels(); } catch (e) {}
+  }
+
   const INDICATOR_ID = 'agresso-autosave-indicator';
   // When true, show extra debug controls (bell, debug, override/settings).
   // Toggle in code during development by setting to `true` and reloading the page.
@@ -220,62 +263,20 @@
   }
 
   function getIndicatorDocument() {
+    // Return the document where the indicator should be injected.
+    // Prefer the top-level same-origin document when available so the
+    // indicator is visible even when the script runs in a frame. Do not
+    // call `ensureIndicator()` here to avoid recursion.
     try {
-      if (window.top && window.top.document && window.top.document.body) {
-        return window.top.document;
-      }
-    } catch (e) {
-      // Ignore cross-origin access errors and fall back to current document.
-    }
-    return document;
-  }
-
-  function applyFieldSizing() {
-    FIELD_STYLE_RULES.forEach(({ selector, style }) => {
-      document.querySelectorAll(selector).forEach((node) => {
-        node.setAttribute('style', style);
-      });
-    });
-  }
-
-  function addProjectLabels() {
-    document.querySelectorAll('td').forEach((cell) => {
-      const title = cell.getAttribute('title');
-      if (!title || cell.querySelector('.agresso-project-label')) {
-        return;
-      }
-
-      const headerRow = cell.parentNode?.parentNode?.parentNode;
-      const cellIndex = cell.cellIndex;
-      if (!headerRow) {
-        return;
-      }
-
-      const headers = headerRow.getElementsByTagName('th');
-      const header = headers[cellIndex];
-      const fieldName = header?.getAttribute('data-fieldname');
-
-      if (fieldName === 'work_order' || fieldName === 'project') {
-        const projectName = title.split('-')[0]?.trim();
-        if (!projectName) {
-          return;
+      try {
+        if (window.top && window.top.document && window.top !== window) {
+          return window.top.document;
         }
-
-        const para = document.createElement('p');
-        para.className = 'agresso-project-label';
-        para.setAttribute(
-          'style',
-          'font-size: 10px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis;'
-        );
-        para.textContent = projectName;
-        cell.appendChild(para);
+      } catch (e) {
+        // access to top may be cross-origin
       }
-    });
-  }
-
-  function enhanceLayout() {
-    applyFieldSizing();
-    addProjectLabels();
+    } catch (e) {}
+    return document;
   }
 
   function scheduleLayoutRefresh() {
@@ -573,7 +574,20 @@
 
   function positionIndicatorNearSaveButton() {
     const indicator = ensureIndicator();
-    const btn = findPrimarySaveButton();
+    // Use the document that actually contains the indicator (may be top-level)
+    const doc = (indicator && indicator.ownerDocument) || document;
+    // Prefer a save button inside the same document as the indicator to
+    // compute a stable anchor; fall back to global search if none found.
+    let btn = null;
+    try {
+      for (const sel of SAVE_BUTTON_SELECTORS) {
+        try {
+          const el = doc.querySelector(sel);
+          if (el && !el.disabled && isVisible(el)) { btn = el; break; }
+        } catch (e) {}
+      }
+    } catch (e) {}
+    if (!btn) btn = findPrimarySaveButton();
     if (!btn) {
       indicator.style.top = 'auto';
       indicator.style.bottom = '20px';
@@ -581,7 +595,6 @@
       indicator.style.left = 'auto';
       return;
     }
-
     const rect = getViewportRect(btn);
     if (!rect) {
       indicator.style.top = 'auto';
@@ -593,14 +606,81 @@
     const indHeight = indicator.offsetHeight || 34;
     const indWidth = indicator.offsetWidth || 180;
     const top = rect.top + (rect.height - indHeight) / 2;
-    const viewportWidth = indicator.ownerDocument?.defaultView?.innerWidth || window.innerWidth || 0;
-    const mirroredLeft = viewportWidth ? viewportWidth - rect.left - indWidth : rect.right + 12;
+    const viewportWidth = (doc.defaultView && doc.defaultView.innerWidth) || window.innerWidth || 0;
+    const viewportHeight = (doc.defaultView && doc.defaultView.innerHeight) || window.innerHeight || 0;
 
-    indicator.style.position = 'fixed';
-    indicator.style.top = `${Math.max(8, top)}px`;
-    indicator.style.left = `${Math.max(8, mirroredLeft)}px`;
-    indicator.style.right = 'auto';
-    indicator.style.bottom = 'auto';
+    // Anchor vertically aligned with the save button, but place the indicator
+    // on the right side of the page (inside the main content area if possible).
+    try {
+      const clampedTop = Math.max(8, Math.min(top, Math.max(8, viewportHeight - indHeight - 8)));
+      // find a suitable content container to anchor inside
+      let rightPos = 16; // default distance from viewport right edge
+      try {
+        const contentSelectors = ['main', '#content', '.container', '.page', '.u4-main', '.u4-content', '.k-grid', '.u4-body'];
+        let chosen = null;
+        let chosenW = 0;
+        for (const sel of contentSelectors) {
+          try {
+            const el = doc.querySelector(sel);
+            if (!el) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width > chosenW && r.width < viewportWidth - 40) { chosen = r; chosenW = r.width; }
+          } catch (e) {}
+        }
+        if (chosen) {
+          const paddingFromContent = 12;
+          const extraInset = 6; // give a few extra pixels from the content edge
+          rightPos = Math.max(8, Math.min(viewportWidth - indWidth - 8, Math.round(viewportWidth - chosen.right + paddingFromContent + extraInset)));
+        } else {
+          // If no content container, try mirroring the save button X position
+          const margin = 12;
+          const extraInset = 6;
+            try {
+              if (rect && typeof rect.left === 'number') {
+                // Mirror the button's horizontal center across the viewport center
+                const btnCenter = rect.left + (rect.width || 0) / 2;
+                const mirroredCenter = Math.round(viewportWidth - btnCenter);
+                let desiredLeft = Math.round(mirroredCenter - indWidth / 2);
+                // Clamp inside viewport with small margins
+                desiredLeft = Math.max(8, Math.min(viewportWidth - indWidth - 8, desiredLeft));
+                // Compute a right offset so the indicator's right edge is fixed
+                let rightPosFromLeft = Math.round(viewportWidth - desiredLeft - indWidth);
+                // Shift a few pixels to the left so it's not flush with the border
+                const mirrorExtraShift = 30;
+                let rightPos = Math.max(8, Math.min(viewportWidth - indWidth - 8, rightPosFromLeft + mirrorExtraShift));
+                // Position using `right` so expansion grows to the left (right edge fixed)
+                indicator.style.position = 'fixed';
+                indicator.style.top = `${clampedTop}px`;
+                indicator.style.right = `${rightPos}px`;
+                indicator.style.left = 'auto';
+                indicator.style.bottom = 'auto';
+                // Ensure transforms/origins anchor to the right side
+                try { indicator.style.transformOrigin = 'right center'; } catch (e) {}
+                return;
+              } else {
+                rightPos = 16 + extraInset;
+              }
+            } catch (e) {
+              rightPos = 16 + extraInset;
+            }
+        }
+      } catch (e) {
+        rightPos = 16;
+      }
+
+      indicator.style.position = 'fixed';
+      indicator.style.top = `${clampedTop}px`;
+      indicator.style.right = `${rightPos}px`;
+      indicator.style.left = 'auto';
+      indicator.style.bottom = 'auto';
+    } catch (e) {
+      // fallback: bottom-right corner
+      indicator.style.position = 'fixed';
+      indicator.style.top = 'auto';
+      indicator.style.bottom = '20px';
+      indicator.style.right = '16px';
+      indicator.style.left = 'auto';
+    }
   }
 
   function bindIndicatorTracking() {

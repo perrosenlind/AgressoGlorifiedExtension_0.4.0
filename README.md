@@ -31,6 +31,10 @@ Warning: Temporary add-ons are removed when the browser restarts.
 - Detects and dismisses save confirmation dialogs automatically (including in background/unfocused windows when possible).
 - Applies minor layout/column sizing improvements for better usability.
 
+## Recent changes
+
+- 2026-01-09: Removed the acknowledgement feature (ack button and stored acknowledgement state). This change removes the extra acknowledge controls and storage; other reminder and period-highlight behavior remains unchanged.
+
 ## New: On/Off Toggle (Autosave control)
 
 - A clickable on/off toggle is embedded into the floating indicator (left side). It persists its state in `localStorage` under the key `agresso_autosave_enabled`.
