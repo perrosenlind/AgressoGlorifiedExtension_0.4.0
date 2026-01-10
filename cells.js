@@ -3239,17 +3239,18 @@
         console.info(LOG_PREFIX, 'checkPeriodAndNotify: using override', override);
         try {
           const overrideStart = startOfDay(override);
-          if (overrideStart.getTime() >= todayStart.getTime()) {
-            if (!isReportStatusKlar()) {
-              showPeriodNotification(override);
-              console.info(LOG_PREFIX, 'checkPeriodAndNotify: override is today-or-later, notified');
-              return true;
-            } else {
-              console.info(LOG_PREFIX, 'checkPeriodAndNotify: override is today-or-later but status Klar, not notifying');
-              return false;
-            }
-          }
-          console.info(LOG_PREFIX, 'checkPeriodAndNotify: override is before today');
+          // Notify if the override date is today or earlier (period due/overdue).
+          if (overrideStart.getTime() <= todayStart.getTime()) {
+                if (!isReportStatusKlar()) {
+                  showPeriodNotification(override);
+                  console.info(LOG_PREFIX, 'checkPeriodAndNotify: override is today-or-earlier, notified');
+                  return true;
+                } else {
+                  console.info(LOG_PREFIX, 'checkPeriodAndNotify: override is today-or-earlier but status Klar, not notifying');
+                  return false;
+                }
+              }
+              console.info(LOG_PREFIX, 'checkPeriodAndNotify: override is after today');
         } catch (e) {
           console.info(LOG_PREFIX, 'checkPeriodAndNotify: override parsing error', e);
         }
@@ -3265,8 +3266,8 @@
       const today = new Date();
       console.info(LOG_PREFIX, 'checkPeriodAndNotify: found end date', localIsoDate(end) || end.toISOString().slice(0,10), 'today', localIsoDate(today) || today.toISOString().slice(0,10));
 
-      // Notify when the period end is today or in the future, but only until Status becomes 'Klar'
-      if (endStart.getTime() >= todayStart.getTime()) {
+      // Notify when the period end is today or earlier (due/overdue), but only until Status becomes 'Klar'
+      if (endStart.getTime() <= todayStart.getTime()) {
         if (!isReportStatusKlar()) {
           showPeriodNotification(end);
           // Force the GUI timer bar to red when not 'Klar'
@@ -3307,13 +3308,13 @@
             try { if (window.top && window.top.document && window.top !== window) applyRedUI(window.top.document); } catch (e) {}
           } catch (e) {}
 
-          console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is today-or-later, notified');
+          console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is today-or-earlier, notified');
           return true;
         }
-        console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is today-or-later but status Klar, not notifying');
+        console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is today-or-earlier but status Klar, not notifying');
         return false;
       }
-      console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is before today');
+      console.info(LOG_PREFIX, 'checkPeriodAndNotify: end date is after today');
     } catch (e) {
       // ignore
     }
