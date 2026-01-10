@@ -29,6 +29,10 @@ Warning: Temporary add-ons are removed on restart.
 - Persisted toggle: the autosave toggle state is stored in `localStorage` under `agresso_autosave_enabled` (default ON).
 - Layout tweaks: applies a few field sizing and labeling improvements to improve usability.
 
+## Recent changes
+
+- 2026-01-10: Fix `checkPeriodAndNotify` logic — the extension now treats a period end (or manual override date) as due when it is today or earlier (due/overdue). Notifications are only shown while the report status is not `Klar`. Previously the logic incorrectly notified for future end dates.
+
 ## Permissions and behavior notes
 
 - `manifest.json` requests only `activeTab` and a host permission for `https://agresso.advania.se/*`.
@@ -69,6 +73,7 @@ Debug controls (hidden by default): set `INDICATOR_DEBUG = true` in `cells.js` o
 2. Open DevTools Console and watch for messages prefixed with `[Agresso Autosave]`.
 3. Edit a field/row, interact to start the timer, then stop interacting. After the idle timeout the extension should attempt a save and log actions.
 4. Toggle the on/off control and verify autosave stops when OFF and resumes when ON.
+5. Period notification test: dispatch the DOM event `agresso_check_period` (e.g. `document.dispatchEvent(new Event('agresso_check_period'))`) or trigger a page change that updates the period end — watch Console for `[Agresso Autosave] checkPeriodAndNotify` logs. Verify a notification appears when the end date (or override) is today or earlier and the status is not `Klar`, and that no notification appears for future end dates.
 
 ## Troubleshooting
 
