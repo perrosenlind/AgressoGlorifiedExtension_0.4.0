@@ -183,6 +183,39 @@
           }
         } catch (e) {}
       });
+      
+      // Also add a compact descriptive label under the code for Delprojekt (work_order/project)
+      // This restores behavior from older extension versions: for table cells in the
+      // work_order/project column, append a small paragraph containing the name part
+      // (the text before the first dash) so users can see the project name under the code.
+      try {
+        const tds = document.querySelectorAll('td');
+        for (let i = 0; i < tds.length; ++i) {
+          try {
+            const td = tds[i];
+            if (!td || !td.getAttribute) continue;
+            const title = td.getAttribute('title');
+            if (!title) continue;
+            const cellIndex = td.cellIndex;
+            const headerRow = td.parentNode && td.parentNode.parentNode && td.parentNode.parentNode.parentNode;
+            if (!headerRow) continue;
+            const headers = headerRow.getElementsByTagName('th');
+            if (!headers || !headers[cellIndex]) continue;
+            const df = headers[cellIndex].getAttribute('data-fieldname');
+            if (df !== 'work_order' && df !== 'project') continue;
+            // Avoid duplicating the label if already added
+            if (td.querySelector && td.querySelector('.agresso-work-order-label')) continue;
+            const idx = title.indexOf('-');
+            const descText = (idx !== -1) ? title.substring(0, idx).trim() : title.trim();
+            if (!descText) continue;
+            const para = document.createElement('p');
+            para.className = 'agresso-work-order-label';
+            para.setAttribute('style', 'font-size: 10px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;');
+            para.textContent = descText;
+            td.appendChild(para);
+          } catch (e) {}
+        }
+      } catch (e) {}
     } catch (e) {}
   }
 
